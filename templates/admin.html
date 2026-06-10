@@ -102,15 +102,15 @@
                 <td style="text-align: center;">
                   <div class="user-action-group">
                     {% if user.is_muted %}
-                      <button class="btn-mute btn-muted-active" type="button" onclick="toggleMute(this.dataset.userId, false, this)">>Unmute</button>
+                      <button class="btn-mute btn-muted-active" type="button" data-user-id="{{ user.id }}" onclick="toggleMute(this.dataset.userId, true, this)">Unmute</button>
                     {% else %}
-                      <button class="btn-mute" type="button" onclick="toggleMute(this.dataset.userId, false, this)">>Mute</button>
+                      <button class="btn-mute" type="button" data-user-id="{{ user.id }}" onclick="toggleMute(this.dataset.userId, false, this)">Mute</button>
                     {% endif %}
                     
                     {% if user.is_banned %}
-                      <button class="btn-ban btn-banned-active" type="button" onclick="toggleBan(this.dataset.userId, false, this)">>Unban</button>
+                      <button class="btn-ban btn-banned-active" type="button" data-user-id="{{ user.id }}" onclick="toggleBan(this.dataset.userId, true, this)">Unban</button>
                     {% else %}
-                      <button class="btn-ban" type="button" oonclick="toggleBan(this.dataset.userId, false, this)">>Ban</button>
+                      <button class="btn-ban" type="button" data-user-id="{{ user.id }}" onclick="toggleBan(this.dataset.userId, false, this)">Ban</button>
                     {% endif %}
                   </div>
                 </td>
