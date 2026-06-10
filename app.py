@@ -221,8 +221,10 @@ def send_verification_email(email, otp):
                 server.login(SMTP_EMAIL, SMTP_PASSWORD)
                 print("[SMTP] Authentication successful. Sending email...", flush=True)
                 server.sendmail(SMTP_EMAIL, email, message)
-            else:
+            else:  
+                print("[SMTP] About to create SMTP connection...", flush=True)
                 server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=30.0)
+                print("[SMTP] SMTP object created.", flush=True)
                 server.ehlo()
                 print("[SMTP] Connection successful. Securing connection with STARTTLS...", flush=True)
                 server.starttls(context=context)
