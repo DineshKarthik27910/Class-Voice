@@ -11,7 +11,3 @@ services:
         value: bl.students.amrita.edu
       - key: FLASK_ENV
         value: production
-    disk:
-      name: data
-      mountPath: /opt/render/project/src/data
-      sizeGB: 1
