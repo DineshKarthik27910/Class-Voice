@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{% block title %}Class Voice{% endblock %}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Syne:wght@700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
+</head>
+<body>
+  <nav class="nav">
+    <a href="{{ url_for('feed') if not session.get('is_admin') else url_for('admin_dashboard') }}" class="nav-logo">
+      <span class="logo-mark">CV</span>
+      <span class="logo-text">Class Voice</span>
+    </a>
+    {% if session.get('user_id') %}
+    <div class="nav-right">
+      {% if session.get('is_admin') %}
+        <span class="badge-admin">Admin</span>
+      {% endif %}
+      <a href="{{ url_for('logout') }}" class="nav-link">Sign out</a>
+    </div>
+    {% endif %}
+  </nav>
+
+  <main class="main-wrap">
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        <div class="flash-stack">
+          {% for category, message in messages %}
+            <div class="flash flash--{{ category }}">{{ message }}</div>
+          {% endfor %}
+        </div>
+      {% endif %}
+    {% endwith %}
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

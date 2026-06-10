@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: classvoice
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn --worker-class eventlet --bind 0.0.0.0:$PORT --workers 1 app:app
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true
+      - key: COLLEGE_DOMAIN
+        value: bl.students.amrita.edu
+      - key: FLASK_ENV
+        value: production
+      - key: MICROSOFT_CLIENT_ID
+        sync: false
+      - key: MICROSOFT_CLIENT_SECRET
+        sync: false
+      - key: MICROSOFT_TENANT_ID
+        value: common
+      - key: REDIRECT_URI
+        sync: false
+    disk:
+      name: data
+      mountPath: /opt/render/project/src
+      sizeGB: 1

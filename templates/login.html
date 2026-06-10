@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}Sign In — Class Voice{% endblock %}
+{% block content %}
+<div class="auth-shell">
+  <div class="auth-card">
+    <h1 class="auth-heading">Class Voice</h1>
+    <p class="auth-sub">Real-time anonymous class conversation. Sign in using your college account.</p>
+    
+    <form method="POST" action="{{ url_for('login') }}" class="auth-form">
+      <label class="field-label" for="email">College Email</label>
+      <input class="field-input" type="email" id="email" name="email" placeholder="username@bl.students.amrita.edu" required autofocus />
+      
+      <label class="field-label" for="password">Password</label>
+      <input class="field-input" type="password" id="password" name="password" placeholder="••••••••" required />
+      
+      <button class="btn-primary" type="submit" style="margin-top: 15px;">Sign In</button>
+    </form>
+
+    <div class="auth-options" style="margin-top: 20px; display: flex; justify-content: space-between; font-size: 13px;">
+      <a href="{{ url_for('register') }}" class="auth-link">Create an Account</a>
+      <a href="{{ url_for('forgot_password') }}" class="auth-link">Forgot Password?</a>
+    </div>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,370 @@
+{% extends "base.html" %}
+{% block title %}Chat — Class Voice{% endblock %}
+{% block content %}
+<div class="chat-wrapper">
+  <!-- Chat Header -->
+  <div class="chat-header">
+    <div class="chat-header-left">
+      <span class="chat-logo-mark">💬</span>
+      <span class="chat-room-name">Anonymous Class Chat</span>
+    </div>
+    <div class="chat-header-right">
+  <span class="online-indicator" id="online-count">0 users online</span>
+
+  {% if session.get('is_admin') %}
+    <a href="/admin" class="admin-nav-btn">Admin Dashboard</a>
+  {% endif %}
+</div>
+  </div>
+
+  <!-- Messages Window -->
+  <div class="chat-messages" id="chat-messages">
+    {% if posts %}
+      {% for post in posts %}
+        <div class="msg-bubble {% if post.user_id == session.user_id %}msg-own{% else %}msg-other{% endif %}" id="msg-{{ post.id }}">
+          <div class="msg-meta">
+            <span class="msg-sender">Anonymous</span>
+            <span class="msg-time" data-timestamp="{{ post.created_at }}">{{ post.created_at }}</span>
+          </div>
+          <div class="msg-text">{{ post.message }}</div>
+          {% if post.filename %}
+            <div class="msg-attachment">
+              <a href="{{ url_for('uploaded_file', filename=post.filename) }}" target="_blank" rel="noopener">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
+                {{ post.orig_name }}
+              </a>
+            </div>
+          {% endif %}
+        </div>
+      {% endfor %}
+    {% else %}
+      <div class="empty-chat-state" id="empty-chat-state">
+        <p>No messages yet. Start the conversation anonymously.</p>
+      </div>
+    {% endif %}
+  </div>
+
+  <!-- Selected file preview -->
+  <div class="file-preview-bar" id="file-preview-bar" style="display: none;">
+    <div class="file-preview-content">
+      <span class="file-preview-icon">📎</span>
+      <span class="file-preview-name" id="file-preview-name"></span>
+    </div>
+    <button class="btn-remove-file" id="btn-remove-file" type="button" aria-label="Remove attachment">&times;</button>
+  </div>
+
+  <!-- Chat Input Footer -->
+  <div class="chat-footer">
+    <div class="mute-banner" id="mute-banner" {% if not is_muted %}style="display: none;"{% endif %}>
+      🔒 You have been muted by an administrator and cannot send messages.
+    </div>
+    <form class="chat-input-form" id="chat-form" onsubmit="event.preventDefault();" {% if is_muted %}style="display: none;"{% endif %}>
+      <label class="chat-attach-btn" for="chat-file" title="Attach file">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
+        <input type="file" id="chat-file" accept=".pdf,.docx,.pptx,.png,.jpg,.jpeg" style="display: none;" />
+      </label>
+      <input type="text" class="chat-text-input" id="chat-text" placeholder="Say something... (Max 2000 characters)" autocomplete="off" required maxlength="2000" />
+      <button class="chat-send-btn" type="submit" id="chat-send" title="Send message">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+      </button>
+    </form>
+  </div>
+</div>
+
+<!-- Socket.IO library -->
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+<script>
+  const socket = io();
+  const currentUserId = parseInt("{{ session.get('user_id', 0) }}");
+  let selectedFile = null;
+  let isMuted = "{{ is_muted }}".toLowerCase() === "true";
+
+  const chatMessages = document.getElementById("chat-messages");
+  const chatForm = document.getElementById("chat-form");
+  const chatText = document.getElementById("chat-text");
+  const chatFile = document.getElementById("chat-file");
+  const filePreviewBar = document.getElementById("file-preview-bar");
+  const filePreviewName = document.getElementById("file-preview-name");
+  const btnRemoveFile = document.getElementById("btn-remove-file");
+  const muteBanner = document.getElementById("mute-banner");
+  const onlineCount = document.getElementById("online-count");
+  const emptyChatState = document.getElementById("empty-chat-state");
+
+  function formatLocalTime(isoString) {
+    if (!isoString) return "";
+    let parsed = isoString;
+    if (!parsed.includes("T")) {
+      parsed = parsed.replace(" ", "T") + "Z";
+    }
+    if (!parsed.endsWith("Z") && !parsed.includes("+")) {
+      parsed += "Z";
+    }
+    const date = new Date(parsed);
+    if (isNaN(date.getTime())) return isoString;
+    return String(date.getHours()).padStart(2, '0') + ":" + String(date.getMinutes()).padStart(2, '0');
+  }
+
+  // Scroll to bottom helper
+  function scrollToBottom() {
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+  }
+  window.onload = function() {
+    document.querySelectorAll(".msg-time").forEach(el => {
+      const ts = el.getAttribute("data-timestamp");
+      if (ts) {
+        el.textContent = formatLocalTime(ts);
+      }
+    });
+    scrollToBottom();
+  };
+
+  // Handle File Selection and Async Upload
+  chatFile.addEventListener("change", function() {
+    if (this.files.length > 0) {
+      const file = this.files[0];
+      const formData = new FormData();
+      formData.append("file", file);
+      
+      fetch("/upload", {
+        method: "POST",
+        body: formData
+      })
+      .then(response => {
+        if (!response.ok) {
+          return response.json().then(err => { throw new Error(err.error || "Upload failed") });
+        }
+        return response.json();
+      })
+      .then(data => {
+        selectedFile = {
+          filename: data.filename,
+          orig_name: data.orig_name
+        };
+        filePreviewName.textContent = data.orig_name;
+        filePreviewBar.style.display = "flex";
+        chatText.focus();
+      })
+      .catch(err => {
+        alert("Upload error: " + err.message);
+        chatFile.value = "";
+      });
+    }
+  });
+
+  // Remove selected file preview
+  btnRemoveFile.addEventListener("click", function() {
+    selectedFile = null;
+    chatFile.value = "";
+    filePreviewBar.style.display = "none";
+  });
+
+  // Handle Send Message
+  chatForm.addEventListener("submit", function(e) {
+    e.preventDefault();
+    if (isMuted) return;
+    
+    const message = chatText.value.trim();
+    if (!message && !selectedFile) return;
+    
+    const payload = {
+      message: message,
+      filename: selectedFile ? selectedFile.filename : null,
+      orig_name: selectedFile ? selectedFile.orig_name : null
+    };
+    
+    socket.emit("send_message", payload);
+    
+    // Reset Inputs
+    chatText.value = "";
+    selectedFile = null;
+    chatFile.value = "";
+    filePreviewBar.style.display = "none";
+  });
+
+  // Socket.IO Events
+  socket.on("connect", () => {
+    console.log("Connected to Socket.IO server");
+  });
+
+  socket.on("online_count", (data) => {
+    onlineCount.textContent = `${data.count} users online`;
+  });
+
+  socket.on("new_message", (data) => {
+    // Prevent duplicates
+    if (document.getElementById(`msg-${data.id}`)) return;
+    
+    if (emptyChatState) {
+      emptyChatState.remove();
+    }
+    
+    const isOwn = data.user_id === currentUserId;
+    const msgElement = document.createElement("div");
+    msgElement.className = `msg-bubble ${isOwn ? 'msg-own' : 'msg-other'}`;
+    msgElement.id = `msg-${data.id}`;
+    
+    let attachmentHtml = "";
+    if (data.filename) {
+      attachmentHtml = `
+        <div class="msg-attachment">
+          <a href="/uploads/${data.filename}" target="_blank" rel="noopener">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
+            ${data.orig_name}
+          </a>
+        </div>
+      `;
+    }
+    
+    msgElement.innerHTML = `
+      <div class="msg-meta">
+        <span class="msg-sender">Anonymous</span>
+        <span class="msg-time" data-timestamp="${data.created_at}">${formatLocalTime(data.created_at)}</span>
+      </div>
+      <div class="msg-text">${data.message}</div>
+      ${attachmentHtml}
+    `;
+    
+    chatMessages.appendChild(msgElement);
+    scrollToBottom();
+    triggerNotification(data);
+  });
+
+  socket.on("message_deleted", (data) => {
+    const msgElement = document.getElementById(`msg-${data.id}`);
+    if (msgElement) {
+      msgElement.remove();
+    }
+  });
+
+  socket.on("user_muted_status", (data) => {
+    if (data.user_id === currentUserId) {
+      isMuted = data.is_muted;
+      if (isMuted) {
+        muteBanner.style.display = "block";
+        chatForm.style.display = "none";
+      } else {
+        muteBanner.style.display = "none";
+        chatForm.style.display = "flex";
+      }
+    }
+  });
+
+  socket.on("user_banned_status", (data) => {
+    if (data.user_id === currentUserId) {
+      alert("Your account has been banned by an administrator.");
+      window.location.href = "/logout";
+    }
+  });
+
+  socket.on("rate_limited", (data) => {
+    alert(data.message);
+  });
+
+  socket.on("error", (data) => {
+    alert(data.message);
+  });
+
+  // Ask for notification permission on first visit
+  if (typeof Notification !== "undefined" && Notification.permission === "default") {
+    Notification.requestPermission();
+  }
+
+  // Helper to unescape HTML entities for push notification body
+  function unescapeHTML(str) {
+    if (!str) return "";
+    const txt = document.createElement("textarea");
+    txt.innerHTML = str;
+    return txt.value;
+  }
+
+  // Synthesize a pleasant chime sound using Web Audio API
+  function playNotificationSound() {
+    try {
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+      if (!AudioContextClass) return;
+      const audioCtx = new AudioContextClass();
+      if (audioCtx.state === 'suspended') {
+        audioCtx.resume();
+      }
+      const now = audioCtx.currentTime;
+      
+      const playTone = (freq, startTime, duration) => {
+        const osc = audioCtx.createOscillator();
+        const gainNode = audioCtx.createGain();
+        
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(freq, startTime);
+        
+        gainNode.gain.setValueAtTime(0.15, startTime);
+        gainNode.gain.exponentialRampToValueAtTime(0.0001, startTime + duration);
+        
+        osc.connect(gainNode);
+        gainNode.connect(audioCtx.destination);
+        
+        osc.start(startTime);
+        osc.stop(startTime + duration);
+      };
+      
+      // Gentle dual-tone chime: E5 (659.25 Hz) then A5 (880 Hz)
+      playTone(659.25, now, 0.15);
+      playTone(880.00, now + 0.08, 0.25);
+    } catch (e) {
+      console.error("Failed to play notification sound:", e);
+    }
+  }
+
+  // Tab Activity / Visibility Handler & Unread Counter
+  let unreadCount = 0;
+  let isTabActive = true;
+  const originalTitle = document.title;
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") {
+      isTabActive = true;
+      unreadCount = 0;
+      document.title = originalTitle;
+    } else {
+      isTabActive = false;
+    }
+  });
+
+  function triggerNotification(data) {
+    const isOwn = data.user_id === currentUserId;
+    
+    // Play sound if message is from another user
+    if (!isOwn) {
+      playNotificationSound();
+    }
+    
+    // Track unread messages and update title if tab is inactive
+    if (!isTabActive) {
+      if (!isOwn) {
+        unreadCount++;
+        document.title = `(${unreadCount}) Class Voice`;
+      }
+    }
+    
+    // Show browser push notification if from another user and permission granted
+    if (!isOwn && typeof Notification !== "undefined" && Notification.permission === "granted") {
+      let body = "";
+      if (data.message) {
+        body = unescapeHTML(data.message);
+      } else if (data.filename) {
+        body = `[Attachment] ${data.orig_name}`;
+      }
+      
+      if (body.length > 60) {
+        body = body.substring(0, 60) + "...";
+      }
+      
+      try {
+        new Notification("New Anonymous Message", {
+          body: body
+        });
+      } catch (e) {
+        console.error("Failed to show push notification:", e);
+      }
+    }
+  }
+</script>
+{% endblock %}
