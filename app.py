@@ -50,13 +50,16 @@ app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 app.config["SESSION_COOKIE_SECURE"] = (os.environ.get("FLASK_ENV", "development") == "production")
 
-UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), "uploads")
+# Use a dedicated data directory for SQLite database and uploads
+DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+
+UPLOAD_FOLDER = os.path.join(DATA_DIR, "uploads")
 ALLOWED_EXTENSIONS = {"pdf", "docx", "pptx", "png", "jpg", "jpeg"}
 MAX_CONTENT_LENGTH = 10 * 1024 * 1024  # 10 MB
 app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
 app.config["MAX_CONTENT_LENGTH"] = MAX_CONTENT_LENGTH
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "classvoice.db")
+DB_PATH = os.path.join(DATA_DIR, "classvoice.db")
 
 COLLEGE_DOMAIN = os.environ.get("COLLEGE_DOMAIN", "bl.students.amrita.edu")
 
@@ -144,10 +147,19 @@ def init_db():
                 new_ts += "+00:00"
             if new_ts != orig_ts:
                 conn.execute("UPDATE posts SET created_at = ? WHERE id = ?", (new_ts, post_id))
-        # Force set admin password to admin123
-        admin_hash = generate_password_hash("admin123")
-        conn.execute("UPDATE users SET password = ? WHERE email = ?", (admin_hash, "admin@bl.students.amrita.edu"))
+        # Create default admin account only if no admin account exists
+        admin_exists = conn.execute("SELECT 1 FROM users WHERE is_admin = 1 LIMIT 1").fetchone()
+        if not admin_exists:
+            admin_hash = generate_password_hash("admin123")
+            conn.execute(
+                "INSERT INTO users (name, email, password, is_admin) VALUES (?, ?, ?, 1)",
+                ("Admin", f"admin@{COLLEGE_DOMAIN}", admin_hash)
+            )
         conn.commit()
+
+# Initialize directories and database at module import time (essential for production Gunicorn setup)
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+init_db()
 
 def log_admin_action(admin_id, action, target_id=None, note=None):
     with get_db() as conn:
@@ -871,7 +883,5 @@ def cleanup_expired_messages():
 # ── Main Entry ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-    init_db()
     socketio.start_background_task(cleanup_expired_messages)
     socketio.run(app, debug=True)
