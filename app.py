@@ -210,36 +210,50 @@ def send_verification_email(email, otp):
     message = msg.as_string()
     
     if SMTP_SERVER and SMTP_EMAIL and SMTP_PASSWORD:
+        server = None
         try:
-            print(f"[SMTP] Connecting to server {SMTP_SERVER}:{SMTP_PORT}...")
+            print(f"[SMTP] Connecting to server {SMTP_SERVER}:{SMTP_PORT} (timeout=30)...", flush=True)
             context = ssl.create_default_context()
             if SMTP_PORT == 465:
-                with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT, context=context, timeout=15) as server:
-                    print("[SMTP] Connection successful (SSL). Authenticating...")
-                    server.login(SMTP_EMAIL, SMTP_PASSWORD)
-                    print("[SMTP] Authentication successful. Sending email...")
-                    server.sendmail(SMTP_EMAIL, email, message)
+                server = smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT, context=context, timeout=30.0)
+                print("[SMTP] Connection successful (SSL). Authenticating...", flush=True)
+                print(f"[SMTP] Logging in as {SMTP_EMAIL}...", flush=True)
+                server.login(SMTP_EMAIL, SMTP_PASSWORD)
+                print("[SMTP] Authentication successful. Sending email...", flush=True)
+                server.sendmail(SMTP_EMAIL, email, message)
             else:
-                with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=15) as server:
-                    server.ehlo()
-                    print("[SMTP] Connection successful. Securing connection with STARTTLS...")
-                    server.starttls(context=context)
-                    server.ehlo()
-                    print("[SMTP] Connection secured. Authenticating...")
-                    server.login(SMTP_EMAIL, SMTP_PASSWORD)
-                    print("[SMTP] Authentication successful. Sending email...")
-                    server.sendmail(SMTP_EMAIL, email, message)
-            print(f"[SMTP] Email sent successfully to {email}")
+                server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=30.0)
+                server.ehlo()
+                print("[SMTP] Connection successful. Securing connection with STARTTLS...", flush=True)
+                server.starttls(context=context)
+                server.ehlo()
+                print("[SMTP] Connection secured. Authenticating...", flush=True)
+                print(f"[SMTP] Logging in as {SMTP_EMAIL}...", flush=True)
+                server.login(SMTP_EMAIL, SMTP_PASSWORD)
+                print("[SMTP] Authentication successful. Sending email...", flush=True)
+                server.sendmail(SMTP_EMAIL, email, message)
+            print(f"[SMTP] Email sent successfully to {email}", flush=True)
             return True
         except Exception as e:
-            print(f"[SMTP Error] Failed to send email to {email}: {e}")
+            print(f"[SMTP Error] Failed to send email to {email}: {e}", flush=True)
             return False
+        finally:
+            if server:
+                try:
+                    print("[SMTP] Closing connection...", flush=True)
+                    server.quit()
+                except Exception:
+                    try:
+                        server.close()
+                    except Exception:
+                        pass
+                print("[SMTP] Connection closed.", flush=True)
     else:
         if FLASK_ENV == "development" or ALLOW_CONSOLE_OTP:
-            print(f"[CONSOLE LOG - DEV ONLY] OTP for {email} is: {otp}")
+            print(f"[CONSOLE LOG - DEV ONLY] OTP for {email} is: {otp}", flush=True)
             return True
         else:
-            print("[SMTP Error] SMTP is not configured and console fallback is disabled.")
+            print("[SMTP Error] SMTP is not configured and console fallback is disabled.", flush=True)
             return False
 
 @app.route("/")
