@@ -6,8 +6,6 @@ import html
 import urllib.parse
 import random
 import hashlib
-import smtplib
-import ssl
 import time
 from datetime import datetime, timedelta, timezone
 from functools import wraps
@@ -21,8 +19,7 @@ from werkzeug.utils import secure_filename
 from werkzeug.security import generate_password_hash, check_password_hash
 from flask_socketio import SocketIO, emit, disconnect
 
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+
 
 def load_env():
     env_path = os.path.join(os.path.dirname(__file__), ".env")
@@ -198,63 +195,45 @@ def send_verification_email(email, otp):
     subject = "Class Voice Verification Code"
     body = f"Your verification code for Class Voice is: {otp}\n\nThis code will expire in 10 minutes."
     
-    msg = MIMEMultipart()
-    msg['From'] = SMTP_EMAIL or "no-reply@classvoice"
-    msg['To'] = email
-    msg['Subject'] = subject
-    msg.attach(MIMEText(body, 'plain'))
-    message = msg.as_string()
+    resend_api_key = os.environ.get("RESEND_API_KEY")
+    resend_from = os.environ.get("RESEND_FROM_EMAIL", "onboarding@resend.dev")
     
-    if SMTP_SERVER and SMTP_EMAIL and SMTP_PASSWORD:
-        server = None
+    if resend_api_key:
+        url = "https://api.resend.com/emails"
+        headers = {
+            "Authorization": f"Bearer {resend_api_key}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "from": resend_from,
+            "to": [email],
+            "subject": subject,
+            "text": body
+        }
         try:
-            print(f"[SMTP] Connecting to server {SMTP_SERVER}:{SMTP_PORT} (timeout=30)...", flush=True)
-            context = ssl.create_default_context()
-            if SMTP_PORT == 465:
-                server = smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT, context=context, timeout=30.0)
-                print("[SMTP] Connection successful (SSL). Authenticating...", flush=True)
-                print(f"[SMTP] Logging in as {SMTP_EMAIL}...", flush=True)
-                server.login(SMTP_EMAIL, SMTP_PASSWORD)
-                print("[SMTP] Authentication successful. Sending email...", flush=True)
-                server.sendmail(SMTP_EMAIL, email, message)
-            else:  
-                print("[SMTP] About to create SMTP connection...", flush=True)
-                server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=30.0)
-                print("[SMTP] SMTP object created.", flush=True)
-                server.ehlo()
-                print("[SMTP] Connection successful. Securing connection with STARTTLS...", flush=True)
-                server.starttls(context=context)
-                server.ehlo()
-                print("[SMTP] Connection secured. Authenticating...", flush=True)
-                print(f"[SMTP] Logging in as {SMTP_EMAIL}...", flush=True)
-                server.login(SMTP_EMAIL, SMTP_PASSWORD)
-                print("[SMTP] Authentication successful. Sending email...", flush=True)
-                server.sendmail(SMTP_EMAIL, email, message)
-            print(f"[SMTP] Email sent successfully to {email}", flush=True)
-            return True
+            print(f"[Resend] Sending email to {email}...", flush=True)
+            response = requests.post(url, json=payload, headers=headers, timeout=10.0)
+            if response.status_code in (200, 201):
+                print(f"[Resend] Email sent successfully to {email}", flush=True)
+                return True
+            else:
+                print(f"[Resend Error] Failed to send email (Status {response.status_code}): {response.text}", flush=True)
+                if ALLOW_CONSOLE_OTP:
+                    print(f"[CONSOLE LOG - SMTP FALLBACK] OTP for {email} is: {otp}", flush=True)
+                    return True
+                return False
         except Exception as e:
-            print(f"[SMTP Error] Failed to send email to {email}: {e}", flush=True)
+            print(f"[Resend Error] Request failed: {e}", flush=True)
             if ALLOW_CONSOLE_OTP:
                 print(f"[CONSOLE LOG - SMTP FALLBACK] OTP for {email} is: {otp}", flush=True)
                 return True
             return False
-        finally:
-            if server:
-                try:
-                    print("[SMTP] Closing connection...", flush=True)
-                    server.quit()
-                except Exception:
-                    try:
-                        server.close()
-                    except Exception:
-                        pass
-                print("[SMTP] Connection closed.", flush=True)
     else:
         if FLASK_ENV == "development" or ALLOW_CONSOLE_OTP:
             print(f"[CONSOLE LOG - DEV ONLY] OTP for {email} is: {otp}", flush=True)
             return True
         else:
-            print("[SMTP Error] SMTP is not configured and console fallback is disabled.", flush=True)
+            print("[Resend Error] RESEND_API_KEY is not configured and console fallback is disabled.", flush=True)
             return False
 
 @app.route("/")
