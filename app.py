@@ -1,8 +1,4 @@
-try:
-    import eventlet
-    eventlet.monkey_patch()
-except ImportError:
-    pass
+import threading
 
 import os
 import uuid
@@ -72,7 +68,7 @@ ALLOW_CONSOLE_OTP = os.environ.get("ALLOW_CONSOLE_OTP", "false").lower() == "tru
 FLASK_ENV = os.environ.get("FLASK_ENV", "development")
 
 # Initialize SocketIO
-socketio = SocketIO(app, cors_allowed_origins="*", manage_session=True)
+socketio = SocketIO(app, cors_allowed_origins="*", manage_session=True, async_mode='threading')
 
 # Global trackers
 connected_users = {}  # user_id -> set of sids
@@ -780,6 +776,7 @@ def too_large(e):
 
 @socketio.on('connect')
 def handle_connect():
+    ensure_cleanup_task_started()
     if 'user_id' not in session:
         return False
     user_id = session['user_id']
@@ -896,8 +893,22 @@ def cleanup_expired_messages():
         except Exception as e:
             print(f"[CLEANUP] Error during cleanup: {e}", flush=True)
 
+cleanup_task_started = False
+cleanup_task_lock = threading.Lock()
+
+def ensure_cleanup_task_started():
+    global cleanup_task_started
+    if not cleanup_task_started:
+        with cleanup_task_lock:
+            if not cleanup_task_started:
+                socketio.start_background_task(cleanup_expired_messages)
+                cleanup_task_started = True
+
+@app.before_request
+def start_cleanup_task_on_request():
+    ensure_cleanup_task_started()
+
 # ── Main Entry ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    socketio.start_background_task(cleanup_expired_messages)
-    socketio.run(app, debug=True)
+    socketio.run(app, debug=True, allow_unsafe_werkzeug=True)
