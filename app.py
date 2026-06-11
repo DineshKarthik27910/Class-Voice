@@ -143,11 +143,14 @@ def init_db():
         # Create default admin account only if no admin account exists
         admin_exists = conn.execute("SELECT 1 FROM users WHERE is_admin = 1 LIMIT 1").fetchone()
         if not admin_exists:
-            admin_hash = generate_password_hash("admin123")
+            import secrets
+            temp_password = secrets.token_urlsafe(16)
+            admin_hash = generate_password_hash(temp_password)
             conn.execute(
                 "INSERT INTO users (name, email, password, is_admin) VALUES (?, ?, ?, 1)",
-                ("Admin", f"admin@{COLLEGE_DOMAIN}", admin_hash)
+                ("Admin", "bl.sc.u4aie25240@bl.students.amrita.edu", admin_hash)
             )
+            print(f"\n[SECURITY] Seeded initial admin account (bl.sc.u4aie25240@bl.students.amrita.edu) with password: {temp_password}\n", flush=True)
         conn.commit()
 
 # Initialize directories and database at module import time (essential for production Gunicorn setup)
@@ -736,14 +739,16 @@ def admin_unban_user(user_id):
 def seed_admin():
     if os.environ.get("FLASK_ENV") != "development":
         abort(403)
-    pw = generate_password_hash("admin123")
+    import secrets
+    temp_password = secrets.token_urlsafe(16)
+    pw = generate_password_hash(temp_password)
     try:
         with get_db() as conn:
             conn.execute(
                 "INSERT INTO users (name, email, password, is_admin) VALUES (?,?,?,1)",
-                ("Admin", f"admin@{COLLEGE_DOMAIN}", pw)
+                ("Admin", "bl.sc.u4aie25240@bl.students.amrita.edu", pw)
             )
-        return "Admin seeded: admin@{} / admin123".format(COLLEGE_DOMAIN)
+        return f"Admin seeded: bl.sc.u4aie25240@bl.students.amrita.edu / {temp_password}"
     except sqlite3.IntegrityError:
         return "Admin already exists."
 

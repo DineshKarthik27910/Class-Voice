@@ -23,7 +23,7 @@ Visit `http://localhost:5000`.
 ```
 GET http://localhost:5000/dev/seed-admin
 ```
-This creates `admin@<COLLEGE_DOMAIN>` / `admin123`. Change the password immediately.
+This seeds the default administrator account (`bl.sc.u4aie25240@bl.students.amrita.edu`) with a dynamically generated temporary password. Admin accounts are managed by the system administrator, and default credentials are not publicly disclosed.
 
 ---
 
