@@ -234,6 +234,9 @@ def send_verification_email(email, otp):
             return True
         except Exception as e:
             print(f"[SMTP Error] Failed to send email to {email}: {e}", flush=True)
+            if ALLOW_CONSOLE_OTP:
+                print(f"[CONSOLE LOG - SMTP FALLBACK] OTP for {email} is: {otp}", flush=True)
+                return True
             return False
         finally:
             if server:
