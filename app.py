@@ -195,35 +195,43 @@ def send_verification_email(email, otp):
     subject = "Class Voice Verification Code"
     body = f"Your verification code for Class Voice is: {otp}\n\nThis code will expire in 10 minutes."
     
-    resend_api_key = os.environ.get("RESEND_API_KEY")
-    resend_from = os.environ.get("RESEND_FROM_EMAIL", "onboarding@resend.dev")
+    brevo_api_key = os.environ.get("BREVO_API_KEY")
+    brevo_from = os.environ.get("BREVO_FROM_EMAIL")
     
-    if resend_api_key:
-        url = "https://api.resend.com/emails"
+    if brevo_api_key and brevo_from:
+        url = "https://api.brevo.com/v3/smtp/email"
         headers = {
-            "Authorization": f"Bearer {resend_api_key}",
-            "Content-Type": "application/json"
+            "api-key": brevo_api_key,
+            "Content-Type": "application/json",
+            "accept": "application/json"
         }
         payload = {
-            "from": resend_from,
-            "to": [email],
+            "sender": {
+                "name": "Class Voice",
+                "email": brevo_from
+            },
+            "to": [
+                {
+                    "email": email
+                }
+            ],
             "subject": subject,
-            "text": body
+            "textContent": body
         }
         try:
-            print(f"[Resend] Sending email to {email}...", flush=True)
+            print(f"[Brevo] Sending email to {email}...", flush=True)
             response = requests.post(url, json=payload, headers=headers, timeout=10.0)
-            if response.status_code in (200, 201):
-                print(f"[Resend] Email sent successfully to {email}", flush=True)
+            if response.status_code in (200, 201, 202):
+                print(f"[Brevo] Email sent successfully to {email}", flush=True)
                 return True
             else:
-                print(f"[Resend Error] Failed to send email (Status {response.status_code}): {response.text}", flush=True)
+                print(f"[Brevo Error] Failed to send email (Status {response.status_code}): {response.text}", flush=True)
                 if ALLOW_CONSOLE_OTP:
                     print(f"[CONSOLE LOG - SMTP FALLBACK] OTP for {email} is: {otp}", flush=True)
                     return True
                 return False
         except Exception as e:
-            print(f"[Resend Error] Request failed: {e}", flush=True)
+            print(f"[Brevo Error] Request failed: {e}", flush=True)
             if ALLOW_CONSOLE_OTP:
                 print(f"[CONSOLE LOG - SMTP FALLBACK] OTP for {email} is: {otp}", flush=True)
                 return True
@@ -233,7 +241,7 @@ def send_verification_email(email, otp):
             print(f"[CONSOLE LOG - DEV ONLY] OTP for {email} is: {otp}", flush=True)
             return True
         else:
-            print("[Resend Error] RESEND_API_KEY is not configured and console fallback is disabled.", flush=True)
+            print("[Brevo Error] BREVO_API_KEY or BREVO_FROM_EMAIL is not configured and console fallback is disabled.", flush=True)
             return False
 
 @app.route("/")
