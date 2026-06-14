@@ -11,3 +11,5 @@ services:
         value: bl.students.amrita.edu
       - key: FLASK_ENV
         value: production
+      - key: DATABASE_URL
+        sync: false

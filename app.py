@@ -72,85 +72,239 @@ connected_users = {}  # user_id -> set of sids
 rate_limits = {}      # user_id -> list of floats (timestamps)
 
 # ── DB helpers ──────────────────────────────────────────────────────────────
+import psycopg2
+import psycopg2.extras
+from contextlib import contextmanager
+
+class SQLiteCompatiblePostgreSQLCursor:
+    def __init__(self, pg_cursor):
+        self._cursor = pg_cursor
+        self._lastrowid = None
+
+    def execute(self, sql, parameters=None):
+        if sql and '?' in sql:
+            sql = sql.replace('?', '%s')
+        
+        if parameters is not None:
+            self._cursor.execute(sql, parameters)
+        else:
+            self._cursor.execute(sql)
+        
+        if "returning id" in sql.lower():
+            try:
+                row = self._cursor.fetchone()
+                if row:
+                    self._lastrowid = row[0]
+            except Exception:
+                pass
+        return self
+
+    @property
+    def lastrowid(self):
+        return self._lastrowid
+
+    def fetchone(self):
+        try:
+            return self._cursor.fetchone()
+        except psycopg2.ProgrammingError as e:
+            if "no results to fetch" in str(e).lower():
+                return None
+            raise
+
+    def fetchall(self):
+        try:
+            return self._cursor.fetchall()
+        except psycopg2.ProgrammingError as e:
+            if "no results to fetch" in str(e).lower():
+                return []
+            raise
+
+class SQLiteCompatiblePostgreSQLConnection:
+    def __init__(self, pg_conn):
+        self._conn = pg_conn
+
+    def cursor(self):
+        return SQLiteCompatiblePostgreSQLCursor(self._conn.cursor(cursor_factory=psycopg2.extras.DictCursor))
+
+    def execute(self, sql, parameters=None):
+        cur = self.cursor()
+        cur.execute(sql, parameters)
+        return cur
+
+    def executescript(self, sql_script):
+        cur = self.cursor()
+        cur.execute(sql_script)
+        return cur
+
+    def commit(self):
+        self._conn.commit()
+
+    def rollback(self):
+        self._conn.rollback()
+
+    def close(self):
+        self._conn.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        try:
+            if exc_type is not None:
+                self.rollback()
+            else:
+                self.commit()
+        finally:
+            self.close()
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+    database_url = os.environ.get("DATABASE_URL")
+    if database_url:
+        pg_conn = psycopg2.connect(database_url)
+        return SQLiteCompatiblePostgreSQLConnection(pg_conn)
+    else:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        return conn
 
 def init_db():
+    database_url = os.environ.get("DATABASE_URL")
     with get_db() as conn:
-        conn.executescript("""
-        CREATE TABLE IF NOT EXISTS users (
-            id        INTEGER PRIMARY KEY AUTOINCREMENT,
-            name      TEXT NOT NULL,
-            email     TEXT NOT NULL UNIQUE,
-            password  TEXT NOT NULL,
-            roll_no   TEXT,
-            is_admin  INTEGER NOT NULL DEFAULT 0,
-            is_muted  INTEGER NOT NULL DEFAULT 0,
-            is_banned INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL DEFAULT (datetime('now'))
-        );
+        if database_url:
+            # PostgreSQL schema
+            conn.executescript("""
+            CREATE TABLE IF NOT EXISTS users (
+                id        SERIAL PRIMARY KEY,
+                name      TEXT NOT NULL,
+                email     TEXT NOT NULL UNIQUE,
+                password  TEXT NOT NULL,
+                roll_no   TEXT,
+                is_admin  INTEGER NOT NULL DEFAULT 0,
+                is_muted  INTEGER NOT NULL DEFAULT 0,
+                is_banned INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT TO_CHAR(NOW(), 'YYYY-MM-DD HH24:MI:SS')
+            );
 
-        CREATE TABLE IF NOT EXISTS posts (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id     INTEGER NOT NULL REFERENCES users(id),
-            message     TEXT NOT NULL,
-            filename    TEXT,
-            orig_name   TEXT,
-            created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-            deleted     INTEGER NOT NULL DEFAULT 0
-        );
+            CREATE TABLE IF NOT EXISTS posts (
+                id          SERIAL PRIMARY KEY,
+                user_id     INTEGER NOT NULL REFERENCES users(id),
+                message     TEXT NOT NULL,
+                filename    TEXT,
+                orig_name   TEXT,
+                created_at  TEXT NOT NULL DEFAULT TO_CHAR(NOW(), 'YYYY-MM-DD HH24:MI:SS'),
+                deleted     INTEGER NOT NULL DEFAULT 0
+            );
 
-        CREATE TABLE IF NOT EXISTS admin_log (
-            id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            admin_id   INTEGER NOT NULL REFERENCES users(id),
-            action     TEXT NOT NULL,
-            target_id  INTEGER,
-            note       TEXT,
-            ts         TEXT NOT NULL DEFAULT (datetime('now'))
-        );
+            CREATE TABLE IF NOT EXISTS admin_log (
+                id         SERIAL PRIMARY KEY,
+                admin_id   INTEGER NOT NULL REFERENCES users(id),
+                action     TEXT NOT NULL,
+                target_id  INTEGER,
+                note       TEXT,
+                ts         TEXT NOT NULL DEFAULT TO_CHAR(NOW(), 'YYYY-MM-DD HH24:MI:SS')
+            );
 
-        CREATE TABLE IF NOT EXISTS otp_verifications (
-            email       TEXT PRIMARY KEY,
-            otp_hash    TEXT NOT NULL,
-            expires_at  TEXT NOT NULL,
-            attempts    INTEGER NOT NULL DEFAULT 0,
-            last_sent   TEXT NOT NULL
-        );
-        """)
-        # Run migrations for existing DB
-        cursor = conn.execute("PRAGMA table_info(users)")
-        columns = [row["name"] for row in cursor.fetchall()]
-        if "is_muted" not in columns:
-            conn.execute("ALTER TABLE users ADD COLUMN is_muted INTEGER NOT NULL DEFAULT 0")
-        if "is_banned" not in columns:
-            conn.execute("ALTER TABLE users ADD COLUMN is_banned INTEGER NOT NULL DEFAULT 0")
+            CREATE TABLE IF NOT EXISTS otp_verifications (
+                email       TEXT PRIMARY KEY,
+                otp_hash    TEXT NOT NULL,
+                expires_at  TEXT NOT NULL,
+                attempts    INTEGER NOT NULL DEFAULT 0,
+                last_sent   TEXT NOT NULL
+            );
+            """)
+            
+            cursor = conn.execute("""
+                SELECT column_name AS name 
+                FROM information_schema.columns 
+                WHERE table_name = 'users'
+            """)
+            columns = [row["name"] for row in cursor.fetchall()]
+            if "is_muted" not in columns:
+                conn.execute("ALTER TABLE users ADD COLUMN is_muted INTEGER NOT NULL DEFAULT 0")
+            if "is_banned" not in columns:
+                conn.execute("ALTER TABLE users ADD COLUMN is_banned INTEGER NOT NULL DEFAULT 0")
+                
+            admin_exists = conn.execute("SELECT 1 FROM users WHERE is_admin = 1 LIMIT 1").fetchone()
+            if not admin_exists:
+                import secrets
+                temp_password = secrets.token_urlsafe(16)
+                admin_hash = generate_password_hash(temp_password)
+                conn.execute(
+                    "INSERT INTO users (name, email, password, is_admin) VALUES (?, ?, ?, 1)",
+                    ("Admin", "bl.sc.u4aie25240@bl.students.amrita.edu", admin_hash)
+                )
+                print(f"\n[SECURITY] Seeded initial admin account (bl.sc.u4aie25240@bl.students.amrita.edu) with password: {temp_password}\n", flush=True)
+        else:
+            # SQLite DDL
+            conn.executescript("""
+            CREATE TABLE IF NOT EXISTS users (
+                id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                name      TEXT NOT NULL,
+                email     TEXT NOT NULL UNIQUE,
+                password  TEXT NOT NULL,
+                roll_no   TEXT,
+                is_admin  INTEGER NOT NULL DEFAULT 0,
+                is_muted  INTEGER NOT NULL DEFAULT 0,
+                is_banned INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
 
-        # Migrate post timestamps to ISO-8601 UTC
-        posts = conn.execute("SELECT id, created_at FROM posts").fetchall()
-        for post in posts:
-            post_id = post["id"]
-            orig_ts = post["created_at"]
-            new_ts = orig_ts
-            if " " in new_ts and "T" not in new_ts:
-                new_ts = new_ts.replace(" ", "T")
-            if not new_ts.endswith("Z") and "+00:00" not in new_ts:
-                new_ts += "+00:00"
-            if new_ts != orig_ts:
-                conn.execute("UPDATE posts SET created_at = ? WHERE id = ?", (new_ts, post_id))
-        # Create default admin account only if no admin account exists
-        admin_exists = conn.execute("SELECT 1 FROM users WHERE is_admin = 1 LIMIT 1").fetchone()
-        if not admin_exists:
-            import secrets
-            temp_password = secrets.token_urlsafe(16)
-            admin_hash = generate_password_hash(temp_password)
-            conn.execute(
-                "INSERT INTO users (name, email, password, is_admin) VALUES (?, ?, ?, 1)",
-                ("Admin", "bl.sc.u4aie25240@bl.students.amrita.edu", admin_hash)
-            )
-            print(f"\n[SECURITY] Seeded initial admin account (bl.sc.u4aie25240@bl.students.amrita.edu) with password: {temp_password}\n", flush=True)
+            CREATE TABLE IF NOT EXISTS posts (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id     INTEGER NOT NULL REFERENCES users(id),
+                message     TEXT NOT NULL,
+                filename    TEXT,
+                orig_name   TEXT,
+                created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                deleted     INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS admin_log (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                admin_id   INTEGER NOT NULL REFERENCES users(id),
+                action     TEXT NOT NULL,
+                target_id  INTEGER,
+                note       TEXT,
+                ts         TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS otp_verifications (
+                email       TEXT PRIMARY KEY,
+                otp_hash    TEXT NOT NULL,
+                expires_at  TEXT NOT NULL,
+                attempts    INTEGER NOT NULL DEFAULT 0,
+                last_sent   TEXT NOT NULL
+            );
+            """)
+            cursor = conn.execute("PRAGMA table_info(users)")
+            columns = [row["name"] for row in cursor.fetchall()]
+            if "is_muted" not in columns:
+                conn.execute("ALTER TABLE users ADD COLUMN is_muted INTEGER NOT NULL DEFAULT 0")
+            if "is_banned" not in columns:
+                conn.execute("ALTER TABLE users ADD COLUMN is_banned INTEGER NOT NULL DEFAULT 0")
+
+            posts = conn.execute("SELECT id, created_at FROM posts").fetchall()
+            for post in posts:
+                post_id = post["id"]
+                orig_ts = post["created_at"]
+                new_ts = orig_ts
+                if " " in new_ts and "T" not in new_ts:
+                    new_ts = new_ts.replace(" ", "T")
+                if not new_ts.endswith("Z") and "+00:00" not in new_ts:
+                    new_ts += "+00:00"
+                if new_ts != orig_ts:
+                    conn.execute("UPDATE posts SET created_at = ? WHERE id = ?", (new_ts, post_id))
+
+            admin_exists = conn.execute("SELECT 1 FROM users WHERE is_admin = 1 LIMIT 1").fetchone()
+            if not admin_exists:
+                import secrets
+                temp_password = secrets.token_urlsafe(16)
+                admin_hash = generate_password_hash(temp_password)
+                conn.execute(
+                    "INSERT INTO users (name, email, password, is_admin) VALUES (?, ?, ?, 1)",
+                    ("Admin", "bl.sc.u4aie25240@bl.students.amrita.edu", admin_hash)
+                )
+                print(f"\n[SECURITY] Seeded initial admin account (bl.sc.u4aie25240@bl.students.amrita.edu) with password: {temp_password}\n", flush=True)
         conn.commit()
 
 # Initialize directories and database at module import time (essential for production Gunicorn setup)
@@ -412,8 +566,11 @@ def verify_otp():
         if action == "register":
             try:
                 with get_db() as conn:
+                    sql = "INSERT INTO users (name, email, password, is_admin) VALUES (?, ?, ?, 0)"
+                    if os.environ.get("DATABASE_URL"):
+                        sql += " RETURNING id"
                     cursor = conn.execute(
-                        "INSERT INTO users (name, email, password, is_admin) VALUES (?, ?, ?, 0)",
+                        sql,
                         (pending["name"], email, pending["password_hash"])
                     )
                     user_id = cursor.lastrowid
@@ -427,7 +584,7 @@ def verify_otp():
                 
                 flash("Registration successful! Welcome to Class Voice.", "success")
                 return redirect(url_for("feed"))
-            except sqlite3.IntegrityError:
+            except (sqlite3.IntegrityError, psycopg2.IntegrityError):
                 flash("Email already registered during this process. Please log in.", "error")
                 session.pop("pending_reg", None)
                 return redirect(url_for("login"))
@@ -552,12 +709,21 @@ def feed():
             return redirect(url_for("login"))
             
         # Load message history
-        posts = conn.execute("""
-            SELECT p.id, p.user_id, p.message, p.filename, p.orig_name, p.created_at
-            FROM posts p
-            WHERE p.deleted = 0 AND datetime(p.created_at) >= datetime('now', '-1 hour')
-            ORDER BY p.created_at ASC
-        """).fetchall()
+        if os.environ.get("DATABASE_URL"):
+            query = """
+                SELECT p.id, p.user_id, p.message, p.filename, p.orig_name, p.created_at
+                FROM posts p
+                WHERE p.deleted = 0 AND CAST(p.created_at AS TIMESTAMPTZ) >= NOW() - INTERVAL '1 hour'
+                ORDER BY p.created_at ASC
+            """
+        else:
+            query = """
+                SELECT p.id, p.user_id, p.message, p.filename, p.orig_name, p.created_at
+                FROM posts p
+                WHERE p.deleted = 0 AND datetime(p.created_at) >= datetime('now', '-1 hour')
+                ORDER BY p.created_at ASC
+            """
+        posts = conn.execute(query).fetchall()
         
     return render_template("feed.html", posts=posts, is_muted=bool(user["is_muted"]))
 
@@ -603,12 +769,21 @@ def uploaded_file(filename):
 @admin_required
 def admin_dashboard():
     with get_db() as conn:
-        posts = conn.execute("""
-            SELECT p.id, p.message, p.filename, p.orig_name, p.created_at, p.user_id
-            FROM posts p
-            WHERE p.deleted = 0 AND datetime(p.created_at) >= datetime('now', '-1 hour')
-            ORDER BY p.created_at DESC
-        """).fetchall()
+        if os.environ.get("DATABASE_URL"):
+            query = """
+                SELECT p.id, p.message, p.filename, p.orig_name, p.created_at, p.user_id
+                FROM posts p
+                WHERE p.deleted = 0 AND CAST(p.created_at AS TIMESTAMPTZ) >= NOW() - INTERVAL '1 hour'
+                ORDER BY p.created_at DESC
+            """
+        else:
+            query = """
+                SELECT p.id, p.message, p.filename, p.orig_name, p.created_at, p.user_id
+                FROM posts p
+                WHERE p.deleted = 0 AND datetime(p.created_at) >= datetime('now', '-1 hour')
+                ORDER BY p.created_at DESC
+            """
+        posts = conn.execute(query).fetchall()
         
         users = conn.execute("""
             SELECT id, name, email, roll_no, is_muted, is_banned
@@ -749,7 +924,7 @@ def seed_admin():
                 ("Admin", "bl.sc.u4aie25240@bl.students.amrita.edu", pw)
             )
         return f"Admin seeded: bl.sc.u4aie25240@bl.students.amrita.edu / {temp_password}"
-    except sqlite3.IntegrityError:
+    except (sqlite3.IntegrityError, psycopg2.IntegrityError):
         return "Admin already exists."
 
 # ── Error pages ───────────────────────────────────────────────────────────────
@@ -840,9 +1015,12 @@ def handle_send_message(data):
     message_escaped = html.escape(message)
     
     created_at = datetime.now(timezone.utc).isoformat()
+    sql = "INSERT INTO posts (user_id, message, filename, orig_name, created_at) VALUES (?,?,?,?,?)"
+    if os.environ.get("DATABASE_URL"):
+        sql += " RETURNING id"
     with get_db() as conn:
         cursor = conn.execute(
-            "INSERT INTO posts (user_id, message, filename, orig_name, created_at) VALUES (?,?,?,?,?)",
+            sql,
             (user_id, message_escaped, filename, orig_name, created_at)
         )
         post_id = cursor.lastrowid
@@ -862,9 +1040,11 @@ def cleanup_expired_messages():
         socketio.sleep(60)
         try:
             with get_db() as conn:
-                expired_posts = conn.execute(
-                    "SELECT id, filename FROM posts WHERE datetime(created_at) < datetime('now', '-1 hour')"
-                ).fetchall()
+                if os.environ.get("DATABASE_URL"):
+                    query = "SELECT id, filename FROM posts WHERE CAST(created_at AS TIMESTAMPTZ) < NOW() - INTERVAL '1 hour'"
+                else:
+                    query = "SELECT id, filename FROM posts WHERE datetime(created_at) < datetime('now', '-1 hour')"
+                expired_posts = conn.execute(query).fetchall()
                 
                 if expired_posts:
                     print(f"[CLEANUP] Found {len(expired_posts)} expired messages.", flush=True)
