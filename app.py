@@ -948,47 +948,58 @@ def too_large(e):
 def handle_connect():
     ensure_cleanup_task_started()
     if 'user_id' not in session:
+        print("[SOCKET CONNECT] Connection rejected: No user_id in session", flush=True)
         return False
     user_id = session['user_id']
     
     with get_db() as conn:
         user = conn.execute("SELECT is_banned FROM users WHERE id=?", (user_id,)).fetchone()
     if not user or user['is_banned']:
+        print(f"[SOCKET CONNECT] Connection rejected: User ID {user_id} is banned or not found", flush=True)
         return False
         
     sid = request.sid
+    transport = request.args.get('transport', 'unknown')
+    print(f"[SOCKET CONNECT] User ID: {user_id}, SID: {sid}, Transport: {transport}", flush=True)
+    
     if user_id not in connected_users:
         connected_users[user_id] = set()
     connected_users[user_id].add(sid)
     
-    emit_online_count()
+    emit_online_count("CONNECT")
 
 @socketio.on('disconnect')
 def handle_disconnect():
     user_id = session.get('user_id')
     sid = request.sid
+    print(f"[SOCKET DISCONNECT] User ID: {user_id}, SID: {sid}", flush=True)
     if user_id in connected_users:
         connected_users[user_id].discard(sid)
         if not connected_users[user_id]:
             del connected_users[user_id]
-    emit_online_count()
+    emit_online_count("DISCONNECT")
 
-def emit_online_count():
+def emit_online_count(event_type="MESSAGE"):
     count = len(connected_users)
+    prefix = f"[SOCKET {event_type}]" if event_type in ("CONNECT", "DISCONNECT") else "[SOCKET MESSAGE]"
+    print(f"{prefix} Online user count: {count}", flush=True)
     socketio.emit('online_count', {'count': count})
 
 @socketio.on('send_message')
 def handle_send_message(data):
     if 'user_id' not in session:
+        print("[SOCKET MESSAGE] send_message failed: No user_id in session", flush=True)
         return
     user_id = session['user_id']
     
     with get_db() as conn:
         user = conn.execute("SELECT is_muted, is_banned FROM users WHERE id=?", (user_id,)).fetchone()
     if not user or user['is_banned']:
+        print(f"[SOCKET MESSAGE] send_message rejected: User ID {user_id} is banned or not found", flush=True)
         disconnect()
         return
     if user['is_muted']:
+        print(f"[SOCKET MESSAGE] send_message rejected: User ID {user_id} is muted", flush=True)
         emit('error', {'message': 'You are currently muted and cannot send messages.'})
         return
         
@@ -1000,6 +1011,7 @@ def handle_send_message(data):
     rate_limits[user_id] = [t for t in rate_limits[user_id] if now - t < 10]
     
     if len(rate_limits[user_id]) >= 5:
+        print(f"[SOCKET MESSAGE] send_message rate limited: User ID {user_id}", flush=True)
         emit('rate_limited', {'message': 'Rate limit exceeded. Please wait before sending more messages.'})
         return
         
@@ -1010,6 +1022,7 @@ def handle_send_message(data):
     orig_name = data.get('orig_name')
     
     if not message and not filename:
+        print(f"[SOCKET MESSAGE] Empty message from User ID {user_id}", flush=True)
         return
         
     message_escaped = html.escape(message)
@@ -1025,6 +1038,8 @@ def handle_send_message(data):
         )
         post_id = cursor.lastrowid
         
+    print(f"[SOCKET MESSAGE] User ID: {user_id} sent message (Post ID: {post_id}, Length: {len(message_escaped)}, File: {orig_name})", flush=True)
+        
     socketio.emit('new_message', {
         'id': post_id,
         'user_id': user_id,
@@ -1033,6 +1048,10 @@ def handle_send_message(data):
         'orig_name': orig_name,
         'created_at': created_at
     })
+
+@socketio.on_error_default
+def default_error_handler(e):
+    print(f"[SOCKET ERROR] Error: {e}", flush=True)
 
 def cleanup_expired_messages():
     print("[CLEANUP] Background task started.", flush=True)
