@@ -42,22 +42,22 @@
           <tbody>
             {% for post in posts %}
               <tr id="row-post-{{ post.id }}">
-                <td style="color: var(--text-3); font-weight: 600;">#{{ post.id }}</td>
-                <td class="td-message">{{ post.message }}</td>
-                <td class="td-file">
+                <td data-label="Message ID" style="color: var(--text-3); font-weight: 600;">#{{ post.id }}</td>
+                <td data-label="Message Content" class="td-message">{{ post.message }}</td>
+                <td data-label="Attachment" class="td-file">
                   {% if post.filename %}
                     <a href="{{ url_for('uploaded_file', filename=post.filename) }}" target="_blank" rel="noopener" class="admin-file-link">{{ post.orig_name }}</a>
                   {% else %}
                     <span class="no-file">—</span>
                   {% endif %}
                 </td>
-                <td class="td-time" data-timestamp="{{ post.created_at }}">{{ post.created_at }}</td>
-                <td class="td-identity">
+                <td data-label="Posted Timestamp" class="td-time" data-timestamp="{{ post.created_at }}">{{ post.created_at }}</td>
+                <td data-label="Author Identity" class="td-identity">
                   <div class="identity-action-container">
                     <button class="btn-reveal" type="button" data-post-id="{{ post.id }}" onclick="revealIdentity(this.dataset.postId, this)">Reveal Identity</button>
                   </div>
                 </td>
-                <td class="td-action" style="text-align: center;">
+                <td data-label="Action" class="td-action" style="text-align: center;">
                   <button class="btn-delete"  type="button"  data-post-id="{{ post.id }}"  onclick="deleteMessage(this.dataset.postId, this)">Remove</button>
                 </td>
               </tr>
@@ -87,10 +87,10 @@
           <tbody>
             {% for user in users %}
               <tr>
-                <td class="td-name">{{ user.name }}</td>
-                <td class="td-email">{{ user.email }}</td>
-                <td class="td-roll">{{ user.roll_no or '—' }}</td>
-                <td>
+                <td data-label="Name" class="td-name">{{ user.name }}</td>
+                <td data-label="Email Address" class="td-email">{{ user.email }}</td>
+                <td data-label="Roll Number" class="td-roll">{{ user.roll_no or '—' }}</td>
+                <td data-label="Status">
                   {% if user.is_banned %}
                     <span class="badge-status status-banned">Banned</span>
                   {% elif user.is_muted %}
@@ -99,7 +99,7 @@
                     <span class="badge-status status-active">Active</span>
                   {% endif %}
                 </td>
-                <td style="text-align: center;">
+                <td data-label="Actions" style="text-align: center;">
                   <div class="user-action-group">
                     {% if user.is_muted %}
                       <button class="btn-mute btn-muted-active" type="button" data-user-id="{{ user.id }}" onclick="toggleMute(this.dataset.userId, true, this)">Unmute</button>
@@ -141,13 +141,13 @@
           <tbody>
             {% for log in logs %}
               <tr>
-                <td class="td-name">{{ log.admin_name }}</td>
-                <td class="td-email">{{ log.admin_email }}</td>
-                <td>
+                <td data-label="Moderator" class="td-name">{{ log.admin_name }}</td>
+                <td data-label="Email" class="td-email">{{ log.admin_email }}</td>
+                <td data-label="Action">
                   <span class="badge-action action-{{ log.action.lower() }}">{{ log.action }}</span>
                 </td>
-                <td class="td-message">{{ log.note }}</td>
-                <td class="td-time" data-timestamp="{{ log.ts }}">{{ log.ts }}</td>
+                <td data-label="Details & Notes" class="td-message">{{ log.note }}</td>
+                <td data-label="Timestamp" class="td-time" data-timestamp="{{ log.ts }}">{{ log.ts }}</td>
               </tr>
             {% endfor %}
           </tbody>
