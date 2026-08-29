@@ -43,6 +43,10 @@ app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 app.config["SESSION_COOKIE_SECURE"] = (os.environ.get("FLASK_ENV", "development") == "production")
 
+if os.environ.get("FLASK_ENV") == "production" and os.environ.get("SECRET_KEY") == "dev-secret-change-in-prod":
+    print("[SECURITY WARNING] Running in production with default SECRET_KEY! Please set SECRET_KEY in environment variables.", flush=True)
+
+
 # Use a dedicated data directory for SQLite database and uploads
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 
@@ -72,9 +76,31 @@ connected_users = {}  # user_id -> set of sids
 rate_limits = {}      # user_id -> list of floats (timestamps)
 
 # ── DB helpers ──────────────────────────────────────────────────────────────
+import re
 import psycopg2
 import psycopg2.extras
+from psycopg2.pool import ThreadedConnectionPool
 from contextlib import contextmanager
+
+pg_pool = None
+pg_pool_lock = threading.Lock()
+
+def get_pg_pool():
+    global pg_pool
+    database_url = os.environ.get("DATABASE_URL")
+    if not database_url:
+        return None
+    if pg_pool is None or pg_pool.closed:
+        with pg_pool_lock:
+            if pg_pool is None or pg_pool.closed:
+                try:
+                    pg_pool = ThreadedConnectionPool(minconn=1, maxconn=15, dsn=database_url)
+                    print("[DB POOL] Initialized ThreadedConnectionPool (minconn=1, maxconn=15)", flush=True)
+                except Exception as e:
+                    print(f"[DB POOL ERROR] Failed to initialize connection pool: {e}", flush=True)
+                    return None
+    return pg_pool
+
 
 class SQLiteCompatiblePostgreSQLCursor:
     def __init__(self, pg_cursor):
@@ -120,8 +146,9 @@ class SQLiteCompatiblePostgreSQLCursor:
             raise
 
 class SQLiteCompatiblePostgreSQLConnection:
-    def __init__(self, pg_conn):
+    def __init__(self, pg_conn, pool=None):
         self._conn = pg_conn
+        self._pool = pool
 
     def cursor(self):
         return SQLiteCompatiblePostgreSQLCursor(self._conn.cursor(cursor_factory=psycopg2.extras.DictCursor))
@@ -137,13 +164,19 @@ class SQLiteCompatiblePostgreSQLConnection:
         return cur
 
     def commit(self):
-        self._conn.commit()
+        if self._conn and not self._conn.closed:
+            self._conn.commit()
 
     def rollback(self):
-        self._conn.rollback()
+        if self._conn and not self._conn.closed:
+            self._conn.rollback()
 
     def close(self):
-        self._conn.close()
+        if self._conn and not self._conn.closed:
+            if self._pool:
+                self._pool.putconn(self._conn)
+            else:
+                self._conn.close()
 
     def __enter__(self):
         return self
@@ -154,14 +187,33 @@ class SQLiteCompatiblePostgreSQLConnection:
                 self.rollback()
             else:
                 self.commit()
+        except Exception:
+            if self._pool and self._conn and not self._conn.closed:
+                self._pool.putconn(self._conn, close=True)
+                self._conn = None
+            raise
         finally:
-            self.close()
+            if self._conn:
+                self.close()
 
 def get_db():
     database_url = os.environ.get("DATABASE_URL")
     if database_url:
-        pg_conn = psycopg2.connect(database_url)
-        return SQLiteCompatiblePostgreSQLConnection(pg_conn)
+        pool = get_pg_pool()
+        if pool:
+            try:
+                pg_conn = pool.getconn()
+                if pg_conn.closed != 0:
+                    pool.putconn(pg_conn, close=True)
+                    pg_conn = pool.getconn()
+                return SQLiteCompatiblePostgreSQLConnection(pg_conn, pool=pool)
+            except Exception as e:
+                print(f"[DB POOL ERROR] Falling back to direct connection: {e}", flush=True)
+                pg_conn = psycopg2.connect(database_url)
+                return SQLiteCompatiblePostgreSQLConnection(pg_conn)
+        else:
+            pg_conn = psycopg2.connect(database_url)
+            return SQLiteCompatiblePostgreSQLConnection(pg_conn)
     else:
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
@@ -211,6 +263,11 @@ def init_db():
                 attempts    INTEGER NOT NULL DEFAULT 0,
                 last_sent   TEXT NOT NULL
             );
+
+            CREATE INDEX IF NOT EXISTS idx_posts_deleted_created ON posts (deleted, created_at);
+            CREATE INDEX IF NOT EXISTS idx_posts_user_id ON posts (user_id);
+            CREATE INDEX IF NOT EXISTS idx_admin_log_admin_id ON admin_log (admin_id);
+            CREATE INDEX IF NOT EXISTS idx_admin_log_ts ON admin_log (ts);
             """)
             
             cursor = conn.execute("""
@@ -275,6 +332,11 @@ def init_db():
                 attempts    INTEGER NOT NULL DEFAULT 0,
                 last_sent   TEXT NOT NULL
             );
+
+            CREATE INDEX IF NOT EXISTS idx_posts_deleted_created ON posts (deleted, created_at);
+            CREATE INDEX IF NOT EXISTS idx_posts_user_id ON posts (user_id);
+            CREATE INDEX IF NOT EXISTS idx_admin_log_admin_id ON admin_log (admin_id);
+            CREATE INDEX IF NOT EXISTS idx_admin_log_ts ON admin_log (ts);
             """)
             cursor = conn.execute("PRAGMA table_info(users)")
             columns = [row["name"] for row in cursor.fetchall()]
@@ -458,10 +520,14 @@ def register():
             flash("Please fill in all fields.", "error")
             return render_template("register.html")
             
-        if not email.endswith(f"@{COLLEGE_DOMAIN}"):
-            flash(f"Only @{COLLEGE_DOMAIN} email addresses are allowed.", "error")
+        CLASS_EMAIL_REGEX = r"^bl\.s\.u4aie25\d{3}@bl\.students\.amrita\.edu$"
+        if not re.match(CLASS_EMAIL_REGEX, email):
+            flash(f"Only class emails matching format bl.s.u4aie25XXX@{COLLEGE_DOMAIN} are allowed.", "error")
             return render_template("register.html")
             
+        roll_match = re.search(r'(u4aie25\d{3})', email, re.IGNORECASE)
+        roll_no = roll_match.group(1).lower() if roll_match else None
+
         with get_db() as conn:
             existing = conn.execute("SELECT id FROM users WHERE email=?", (email,)).fetchone()
         if existing:
@@ -496,10 +562,13 @@ def register():
             "action": "register",
             "name": name,
             "email": email,
+            "roll_no": roll_no,
             "password_hash": generate_password_hash(password)
         }
-        if FLASK_ENV == "development":
+        if FLASK_ENV == "development" and ALLOW_CONSOLE_OTP:
             session["dev_otp"] = otp
+        else:
+            session.pop("dev_otp", None)
         
         if send_verification_email(email, otp):
             flash("Verification code sent to your email.", "success")
@@ -566,17 +635,18 @@ def verify_otp():
         if action == "register":
             try:
                 with get_db() as conn:
-                    sql = "INSERT INTO users (name, email, password, is_admin) VALUES (?, ?, ?, 0)"
+                    sql = "INSERT INTO users (name, email, password, roll_no, is_admin) VALUES (?, ?, ?, ?, 0)"
                     if os.environ.get("DATABASE_URL"):
                         sql += " RETURNING id"
                     cursor = conn.execute(
                         sql,
-                        (pending["name"], email, pending["password_hash"])
+                        (pending["name"], email, pending["password_hash"], pending.get("roll_no"))
                     )
                     user_id = cursor.lastrowid
                     user_name = pending["name"]
                 
                 session.pop("pending_reg", None)
+                session.pop("dev_otp", None)
                 session["user_id"] = user_id
                 session["user_name"] = user_name
                 session["is_admin"] = False
@@ -587,13 +657,15 @@ def verify_otp():
             except (sqlite3.IntegrityError, psycopg2.IntegrityError):
                 flash("Email already registered during this process. Please log in.", "error")
                 session.pop("pending_reg", None)
+                session.pop("dev_otp", None)
                 return redirect(url_for("login"))
         elif action == "forgot":
             session["pending_reg"]["verified"] = True
             session.modified = True
             return redirect(url_for("reset_password"))
             
-    return render_template("verify_otp.html", email=email, dev_otp=session.get("dev_otp"))
+    dev_otp_val = session.get("dev_otp") if (FLASK_ENV == "development" and ALLOW_CONSOLE_OTP) else None
+    return render_template("verify_otp.html", email=email, dev_otp=dev_otp_val)
 
 @app.route("/forgot-password", methods=["GET", "POST"])
 def forgot_password():
@@ -648,8 +720,10 @@ def forgot_password():
             "email": email,
             "verified": False
         }
-        if FLASK_ENV == "development":
+        if FLASK_ENV == "development" and ALLOW_CONSOLE_OTP:
             session["dev_otp"] = otp
+        else:
+            session.pop("dev_otp", None)
         
         if send_verification_email(email, otp):
             flash("Verification code sent to your email.", "success")
@@ -708,18 +782,20 @@ def feed():
             session.clear()
             return redirect(url_for("login"))
             
-        # Load message history
+        # Load message history with is_admin flag for sender
         if os.environ.get("DATABASE_URL"):
             query = """
-                SELECT p.id, p.user_id, p.message, p.filename, p.orig_name, p.created_at
+                SELECT p.id, p.user_id, p.message, p.filename, p.orig_name, p.created_at, u.is_admin AS is_admin
                 FROM posts p
+                JOIN users u ON p.user_id = u.id
                 WHERE p.deleted = 0 AND CAST(p.created_at AS TIMESTAMPTZ) >= NOW() - INTERVAL '1 hour'
                 ORDER BY p.created_at ASC
             """
         else:
             query = """
-                SELECT p.id, p.user_id, p.message, p.filename, p.orig_name, p.created_at
+                SELECT p.id, p.user_id, p.message, p.filename, p.orig_name, p.created_at, u.is_admin AS is_admin
                 FROM posts p
+                JOIN users u ON p.user_id = u.id
                 WHERE p.deleted = 0 AND datetime(p.created_at) >= datetime('now', '-1 hour')
                 ORDER BY p.created_at ASC
             """
@@ -969,7 +1045,7 @@ def handle_connect():
     emit_online_count("CONNECT")
 
 @socketio.on('disconnect')
-def handle_disconnect():
+def handle_disconnect(*args):
     user_id = session.get('user_id')
     sid = request.sid
     print(f"[SOCKET DISCONNECT] User ID: {user_id}, SID: {sid}", flush=True)
@@ -993,7 +1069,7 @@ def handle_send_message(data):
     user_id = session['user_id']
     
     with get_db() as conn:
-        user = conn.execute("SELECT is_muted, is_banned FROM users WHERE id=?", (user_id,)).fetchone()
+        user = conn.execute("SELECT is_muted, is_banned, is_admin FROM users WHERE id=?", (user_id,)).fetchone()
     if not user or user['is_banned']:
         print(f"[SOCKET MESSAGE] send_message rejected: User ID {user_id} is banned or not found", flush=True)
         disconnect()
@@ -1046,7 +1122,8 @@ def handle_send_message(data):
         'message': message_escaped,
         'filename': filename,
         'orig_name': orig_name,
-        'created_at': created_at
+        'created_at': created_at,
+        'is_admin': bool(user['is_admin'])
     })
 
 @socketio.on_error_default

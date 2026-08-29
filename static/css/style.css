@@ -462,6 +462,15 @@ button { cursor: pointer; font-family: inherit; }
   font-weight: 600;
 }
 
+.msg-sender-admin {
+  color: #ef4444 !important;
+  font-weight: 700;
+  background: rgba(239, 68, 68, 0.12);
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
 .msg-time {
   margin-left: 12px;
 }

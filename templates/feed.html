@@ -23,7 +23,9 @@
       {% for post in posts %}
         <div class="msg-bubble {% if post.user_id == session.user_id %}msg-own{% else %}msg-other{% endif %}" id="msg-{{ post.id }}">
           <div class="msg-meta">
-            <span class="msg-sender">Anonymous</span>
+            <span class="msg-sender {% if post.is_admin %}msg-sender-admin{% endif %}">
+              {% if post.is_admin %}Admin{% else %}Anonymous{% endif %}
+            </span>
             <span class="msg-time" data-timestamp="{{ post.created_at }}">{{ post.created_at }}</span>
           </div>
           <div class="msg-text">{{ post.message }}</div>
@@ -74,7 +76,12 @@
 <!-- Socket.IO library -->
 <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
 <script>
-  const socket = io();
+  const socket = io({
+    transports: ['polling', 'websocket'],
+    reconnection: true,
+    reconnectionAttempts: 10,
+    reconnectionDelay: 1000
+  });
   const currentUserId = parseInt("{{ session.get('user_id', 0) }}");
   let selectedFile = null;
   let isMuted = "{{ is_muted }}".toLowerCase() === "true";
@@ -186,6 +193,22 @@
     console.log("Connected to Socket.IO server");
   });
 
+  socket.on("connect_error", (err) => {
+    console.error("Socket.IO connection error:", err);
+    if (onlineCount) {
+      onlineCount.textContent = "Connecting...";
+    }
+  });
+
+  socket.on("disconnect", (reason) => {
+    console.warn("Socket.IO disconnected:", reason);
+    if (reason === "io server disconnect") {
+      window.location.reload();
+    } else if (onlineCount) {
+      onlineCount.textContent = "Reconnecting...";
+    }
+  });
+
   socket.on("online_count", (data) => {
     onlineCount.textContent = `${data.count} users online`;
   });
@@ -215,9 +238,12 @@
       `;
     }
     
+    const senderLabel = data.is_admin ? "Admin" : "Anonymous";
+    const senderClass = data.is_admin ? "msg-sender msg-sender-admin" : "msg-sender";
+
     msgElement.innerHTML = `
       <div class="msg-meta">
-        <span class="msg-sender">Anonymous</span>
+        <span class="${senderClass}">${senderLabel}</span>
         <span class="msg-time" data-timestamp="${data.created_at}">${formatLocalTime(data.created_at)}</span>
       </div>
       <div class="msg-text">${data.message}</div>
