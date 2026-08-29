@@ -520,9 +520,9 @@ def register():
             flash("Please fill in all fields.", "error")
             return render_template("register.html")
             
-        CLASS_EMAIL_REGEX = r"^bl\.s\.u4aie25\d{3}@bl\.students\.amrita\.edu$"
+        CLASS_EMAIL_REGEX = r"^bl\.sc\.u4aie25\d{3}@bl\.students\.amrita\.edu$"
         if not re.match(CLASS_EMAIL_REGEX, email):
-            flash(f"Only class emails matching format bl.s.u4aie25XXX@{COLLEGE_DOMAIN} are allowed.", "error")
+            flash(f"Only class emails matching format bl.sc.u4aie25XXX@{COLLEGE_DOMAIN} are allowed.", "error")
             return render_template("register.html")
             
         roll_match = re.search(r'(u4aie25\d{3})', email, re.IGNORECASE)
