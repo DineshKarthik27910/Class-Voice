@@ -1273,20 +1273,28 @@ def async_moderate_post(post_id, user_id, message, message_escaped, created_at, 
     with app.app_context():
         try:
             mod_result = moderate_message(message)
-            print(f"[MODERATION] Async result for Post #{post_id} (User ID {user_id}): {mod_result['category']} "
-                  f"(confidence={mod_result['confidence']:.2f}, reason={mod_result['reason'][:80]})", flush=True)
+            category = mod_result.get("category", "SAFE")
+            if category == "AI_UNAVAILABLE":
+                print(f"[MODERATION] Async result for Post #{post_id} (User ID {user_id}): AI_UNAVAILABLE "
+                      f"(reason={mod_result['reason']})", flush=True)
+            else:
+                conf_val = mod_result.get("confidence")
+                conf_str = f"confidence={conf_val:.2f}, " if conf_val is not None else ""
+                print(f"[MODERATION] Async result for Post #{post_id} (User ID {user_id}): {category} "
+                      f"({conf_str}reason={mod_result['reason'][:80]})", flush=True)
         except Exception as e:
-            print(f"[MODERATION ERROR] Post #{post_id}: {e}", flush=True)
+            print(f"[MODERATION FALLBACK] AI unavailable\nReason: {type(e).__name__}: {e}", flush=True)
             mod_result = {
-                "category": "POTENTIALLY_ABUSIVE",
-                "reason": f"AI moderation service error: {str(e)}",
-                "confidence": 0.50
+                "category": "SAFE",
+                "reason": "AI moderation unavailable — treated as SAFE by availability fallback",
+                "confidence": None,
+                "ai_status": "unavailable"
             }
 
         category = mod_result.get("category", "SAFE")
 
-        # ── SAFE: Do nothing. Message remains visible. ───────────────────
-        if category == "SAFE":
+        # ── SAFE / AI_UNAVAILABLE: Do nothing. Message remains visible, no review created. ──
+        if category in ("SAFE", "AI_UNAVAILABLE"):
             return
 
         # ── POTENTIALLY_ABUSIVE: Message remains visible, create review, notify admins
@@ -1303,18 +1311,18 @@ def async_moderate_post(post_id, user_id, message, message_escaped, created_at, 
                     mr_sql += " RETURNING id"
                 cursor = conn.execute(mr_sql, (
                     post_id, user_id, mod_result["category"], mod_result["reason"],
-                    mod_result["confidence"], "pending", created_at
+                    mod_result.get("confidence"), "pending", created_at
                 ))
                 review_id = cursor.lastrowid
 
-            print(f"[MODERATION] POTENTIALLY_ABUSIVE — Review #{review_id} created for Post #{post_id}", flush=True)
+            print(f"[MODERATION] {category} — Review #{review_id} created for Post #{post_id}", flush=True)
             emit_to_admins('moderation_review_new', {
                 'id': review_id,
                 'post_id': post_id,
                 'message': message_escaped,
                 'category': mod_result["category"],
                 'reason': mod_result["reason"],
-                'confidence': mod_result["confidence"],
+                'confidence': mod_result.get("confidence"),
                 'created_at': created_at,
             })
 

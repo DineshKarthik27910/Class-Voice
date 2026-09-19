@@ -450,17 +450,218 @@ class TestModeration(unittest.TestCase):
 
         print("[SUCCESS] Student cannot access moderation endpoints test passed.")
 
-    def test_moderation_api_failure_fallback(self):
-        """Verify API failure returns POTENTIALLY_ABUSIVE (not SAFE)."""
+    def test_gemini_http_429_availability_fallback(self):
+        """Verify Gemini HTTP 429 treats normal message as SAFE for availability (no review created)."""
         from unittest.mock import patch
-        with patch("moderation._call_gemini", side_effect=RuntimeError("API timeout")):
-            # Need to ensure GEMINI_API_KEY is set so it tries the API
-            with patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}):
-                from moderation import moderate_message
-                result = moderate_message("some test message")
-                self.assertEqual(result["category"], "POTENTIALLY_ABUSIVE")
-                self.assertIn("unavailable", result["reason"].lower())
-        print("[SUCCESS] API failure fallback to POTENTIALLY_ABUSIVE test passed.")
+        with patch("moderation._call_gemini", side_effect=RuntimeError("Gemini API returned HTTP 429: RESOURCE_EXHAUSTED")), \
+             patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}):
+            from moderation import moderate_message
+            result = moderate_message("hey bro send me notes")
+            self.assertEqual(result["category"], "SAFE")
+            self.assertEqual(result.get("ai_status"), "unavailable")
+            self.assertNotEqual(result["category"], "POTENTIALLY_ABUSIVE")
+            self.assertNotEqual(result["category"], "SEVERE_VIOLATION")
+        print("[SUCCESS] Gemini HTTP 429 -> SAFE availability fallback test passed.")
+
+    def test_gemini_timeout_availability_fallback(self):
+        """Verify Gemini timeout treats normal message as SAFE for availability."""
+        from unittest.mock import patch
+        import requests
+        with patch("moderation._call_gemini", side_effect=requests.exceptions.Timeout("Read timed out")), \
+             patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}):
+            from moderation import moderate_message
+            result = moderate_message("where is the assignment?")
+            self.assertEqual(result["category"], "SAFE")
+            self.assertEqual(result.get("ai_status"), "unavailable")
+            self.assertNotEqual(result["category"], "POTENTIALLY_ABUSIVE")
+            self.assertNotEqual(result["category"], "SEVERE_VIOLATION")
+        print("[SUCCESS] Gemini timeout -> SAFE availability fallback test passed.")
+
+    def test_gemini_500_availability_fallback(self):
+        """Verify Gemini 500 treats normal message as SAFE for availability."""
+        from unittest.mock import patch
+        with patch("moderation._call_gemini", side_effect=RuntimeError("Gemini API returned HTTP 500: Internal Server Error")), \
+             patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}):
+            from moderation import moderate_message
+            result = moderate_message("testing server failure normal conversation")
+            self.assertEqual(result["category"], "SAFE")
+            self.assertEqual(result.get("ai_status"), "unavailable")
+            self.assertNotEqual(result["category"], "POTENTIALLY_ABUSIVE")
+            self.assertNotEqual(result["category"], "SEVERE_VIOLATION")
+        print("[SUCCESS] Gemini HTTP 500 -> SAFE availability fallback test passed.")
+
+    def test_deterministic_emergency_safety_guard(self):
+        """Verify deterministic safety guard catches unambiguous severe threats, suicide, doxxing, and extreme slurs before Gemini."""
+        from unittest.mock import patch
+        from moderation import moderate_message
+
+        severe_messages = [
+            ("I will kill you", "physical threat"),
+            ("im gonna kill you", "physical threat"),
+            ("go kill yourself", "suicide encouragement"),
+            ("commit suicide", "suicide encouragement"),
+            ("k y s", "suicide instruction"),
+            ("doxxed: 123 Main Street", "doxxing"),
+            ("madarchod", "unambiguous hate slur"),
+            ("lanjakoduku", "unambiguous hate slur"),
+            ("going to shoot up the college", "mass threat"),
+            ("hii  nigga", "unambiguous hate slur"),
+            ("nigga", "unambiguous hate slur"),
+            ("hii ra puka", "unambiguous hate slur"),
+        ]
+
+        # Even if Gemini would fail with 429, emergency guard must catch these deterministically!
+        with patch("moderation._call_gemini", side_effect=RuntimeError("API 429 quota")):
+            for msg, label in severe_messages:
+                result = moderate_message(msg)
+                self.assertEqual(
+                    result["category"], "SEVERE_VIOLATION",
+                    f"Emergency safety guard failed to catch severe pattern '{msg}' ({label})"
+                )
+                self.assertEqual(result["confidence"], 1.0)
+                self.assertIn("Emergency safety rule", result["reason"])
+
+        print("[SUCCESS] Deterministic emergency safety guard test passed.")
+
+    def test_ordinary_insults_not_deterministic_severe(self):
+        """Verify casual insults are NOT automatically deleted by deterministic guard and go to Gemini."""
+        from unittest.mock import patch
+        from moderation import _check_emergency_severe, moderate_message
+
+        casual_insults = [
+            "you're stupid",
+            "bro r u stupid",
+            "idiot",
+            "shut up",
+            "nobody likes you",
+            "useless fellow",
+        ]
+
+        for insult in casual_insults:
+            self.assertIsNone(
+                _check_emergency_severe(insult),
+                f"Casual insult '{insult}' must NOT trigger deterministic severe deletion!"
+            )
+
+        # When Gemini returns POTENTIALLY_ABUSIVE, casual insults return POTENTIALLY_ABUSIVE (not SEVERE)
+        mock_result = {"category": "POTENTIALLY_ABUSIVE", "reason": "Borderline insult", "confidence": 0.75}
+        with patch("moderation._call_gemini", return_value=mock_result), \
+             patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}):
+            for insult in casual_insults:
+                res = moderate_message(insult)
+                self.assertEqual(res["category"], "POTENTIALLY_ABUSIVE")
+                self.assertNotEqual(res["category"], "SEVERE_VIOLATION")
+
+        print("[SUCCESS] Ordinary insults NOT deterministic severe deletion test passed.")
+
+    def test_admin_approve_ai_unavailable_review(self):
+        """Verify admin can approve an AI_UNAVAILABLE review."""
+        from datetime import datetime, timezone
+        created_at = datetime.now(timezone.utc).isoformat()
+
+        with self.get_db() as conn:
+            conn.execute("INSERT OR IGNORE INTO posts (id, user_id, message, created_at, deleted) VALUES (9010, 900, 'unmoderated msg', ?, 0)", (created_at,))
+            conn.execute("INSERT OR IGNORE INTO moderation_reviews (id, post_id, user_id, category, reason, confidence, status, created_at) VALUES (9010, 9010, 900, 'AI_UNAVAILABLE', 'AI moderation unavailable — manual review required.', NULL, 'pending', ?)", (created_at,))
+            conn.commit()
+
+        client = self.app.test_client()
+        with client.session_transaction() as sess:
+            sess['user_id'] = 901
+            sess['user_name'] = 'Mod Test Admin'
+            sess['is_admin'] = True
+
+        resp = client.post('/admin/moderation/approve/9010')
+        self.assertEqual(resp.status_code, 200)
+
+        with self.get_db() as conn:
+            review = conn.execute("SELECT status, action FROM moderation_reviews WHERE id=9010").fetchone()
+            self.assertEqual(review["status"], "approved")
+            self.assertEqual(review["action"], "kept")
+            post = conn.execute("SELECT deleted FROM posts WHERE id=9010").fetchone()
+            self.assertEqual(post["deleted"], 0)
+
+        print("[SUCCESS] Admin approve AI_UNAVAILABLE review test passed.")
+
+    def test_admin_reject_ai_unavailable_review(self):
+        """Verify admin can reject and delete an AI_UNAVAILABLE review."""
+        from datetime import datetime, timezone
+        created_at = datetime.now(timezone.utc).isoformat()
+
+        with self.get_db() as conn:
+            conn.execute("INSERT OR IGNORE INTO posts (id, user_id, message, created_at, deleted) VALUES (9011, 900, 'bad unmoderated msg', ?, 0)", (created_at,))
+            conn.execute("INSERT OR IGNORE INTO moderation_reviews (id, post_id, user_id, category, reason, confidence, status, created_at) VALUES (9011, 9011, 900, 'AI_UNAVAILABLE', 'AI moderation unavailable — manual review required.', NULL, 'pending', ?)", (created_at,))
+            conn.commit()
+
+        client = self.app.test_client()
+        with client.session_transaction() as sess:
+            sess['user_id'] = 901
+            sess['user_name'] = 'Mod Test Admin'
+            sess['is_admin'] = True
+
+        resp = client.post('/admin/moderation/reject/9011')
+        self.assertEqual(resp.status_code, 200)
+
+        with self.get_db() as conn:
+            review = conn.execute("SELECT status, action FROM moderation_reviews WHERE id=9011").fetchone()
+            self.assertEqual(review["status"], "rejected")
+            self.assertEqual(review["action"], "deleted")
+            post = conn.execute("SELECT deleted FROM posts WHERE id=9011").fetchone()
+            self.assertEqual(post["deleted"], 1)
+
+        print("[SUCCESS] Admin reject AI_UNAVAILABLE review test passed.")
+
+    def test_async_ai_unavailable_socket_flow(self):
+        """Verify message stays visible and creates review when Gemini fails asynchronously."""
+        import time
+        from unittest.mock import patch
+        from app import app, socketio, get_db
+
+        client1 = app.test_client()
+        client2 = app.test_client()
+        with client1.session_transaction() as sess:
+            sess['user_id'] = 900
+            sess['user_name'] = 'Mod Test Student'
+        with client2.session_transaction() as sess:
+            sess['user_id'] = 901
+            sess['user_name'] = 'Mod Test Admin'
+            sess['is_admin'] = True
+
+        # Simulate Gemini failure (HTTP 429 quota)
+        with patch("moderation._call_gemini", side_effect=RuntimeError("Gemini API returned HTTP 429: RESOURCE_EXHAUSTED")), \
+             patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}), \
+             patch("app.MODERATION_ENABLED", True):
+
+            s1 = socketio.test_client(app, flask_test_client=client1)
+            s2 = socketio.test_client(app, flask_test_client=client2)
+
+            s1.emit('send_message', {'message': 'hey bro send me notes'})
+            time.sleep(0.2)
+
+            # Client 2 should receive new_message immediately
+            received_by_s2 = s2.get_received()
+            new_msgs = [e for e in received_by_s2 if e['name'] == 'new_message']
+            self.assertEqual(len(new_msgs), 1)
+            post_id = new_msgs[0]['args'][0]['id']
+
+            # Message must NOT be deleted
+            del_events = [e for e in received_by_s2 if e['name'] == 'message_deleted']
+            self.assertEqual(len(del_events), 0, "Normal message during AI outage must NOT be deleted")
+
+            # Admin must NOT receive any moderation_review_new events for normal message!
+            admin_review_events = [e for e in received_by_s2 if e['name'] == 'moderation_review_new']
+            self.assertEqual(len(admin_review_events), 0, "Admin must NOT receive review event for normal message during outage")
+
+            # Verify in DB: message exists and is visible (deleted=0), NO review row exists!
+            with get_db() as conn:
+                post = conn.execute("SELECT deleted FROM posts WHERE id=?", (post_id,)).fetchone()
+                self.assertEqual(post["deleted"], 0)
+                review = conn.execute("SELECT id FROM moderation_reviews WHERE post_id=?", (post_id,)).fetchone()
+                self.assertIsNone(review, "Normal message during 429 outage must NOT create a moderation review")
+
+            s1.disconnect()
+            s2.disconnect()
+
+        print("[SUCCESS] Normal message during 429 outage stays visible with NO review created.")
 
     def test_realtime_deletion_on_reject(self):
         """Verify Socket.IO message_deleted is emitted on moderation reject."""

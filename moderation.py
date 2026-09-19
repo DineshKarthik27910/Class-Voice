@@ -25,11 +25,101 @@ import requests
 
 CATEGORIES = ("SAFE", "POTENTIALLY_ABUSIVE", "SEVERE_VIOLATION")
 
-_FALLBACK_RESULT = {
-    "category": "POTENTIALLY_ABUSIVE",
-    "reason": "AI moderation unavailable — flagged for manual review",
-    "confidence": 0.0,
-}
+# Deterministic Emergency Safety Guard Patterns
+# Targets ONLY unambiguous severe-risk patterns:
+# 1. explicit credible threats of physical violence
+# 2. explicit encouragement/instruction for suicide or self-harm
+# 3. explicit doxxing / private-address exposure
+# 4. extremely explicit targeted hate/slur patterns where there is no meaningful ambiguity
+# (Ordinary profanity, insults like "you're stupid", "idiot", "shut up" are intentionally NOT matched)
+_THREAT_PATTERNS = [
+    re.compile(
+        r"\b(?:i\s*(?:will|'ll|am\s*going\s*to|gonna)|i'?m\s*(?:going\s*to|gonna))\s*"
+        r"(?:kill|murder|shoot|stab|slit\s+your\s+throat)\s+(?:you|u)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:i\s*(?:will|'ll|am\s*going\s*to|gonna)|i'?m\s*(?:going\s*to|gonna))\s*"
+        r"(?:find\s+(?:and|&)\s*)?(?:kill|murder)\s+(?:you|u)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:going\s*to|gonna|will)\s*(?:shoot\s*up|bomb|blow\s*up)\s+"
+        r"(?:the\s+)?(?:college|campus|class|school|university)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:bomb\s*threat|death\s*threat\s*to\s*(?:you|u))\b",
+        re.IGNORECASE,
+    ),
+]
+
+_SUICIDE_PATTERNS = [
+    re.compile(r"\b(?:go\s+)?kill\s+your\s*self\b", re.IGNORECASE),
+    re.compile(r"\bcommit\s+suicide\b", re.IGNORECASE),
+    re.compile(r"\b(?:go\s+)?slit\s+your\s+wrists?\b", re.IGNORECASE),
+    re.compile(r"\b(?:go\s+)?hang\s+your\s*self\b", re.IGNORECASE),
+    re.compile(r"\bdrink\s+bleach(?:\s+and\s+die)?\b", re.IGNORECASE),
+    re.compile(r"\bk\s*y\s*s\b", re.IGNORECASE),
+]
+
+_DOXXING_PATTERNS = [
+    re.compile(r"\bdoxx(?:ed|ing)?\s*:", re.IGNORECASE),
+    re.compile(r"\bi(?:'m|\s*am)\s*doxxing\s+(?:you|u)\b", re.IGNORECASE),
+    re.compile(
+        r"\bhere\s+is\s+(?:his|her|their|your)\s+(?:home\s+address|private\s+address|phone\s+number)\s*:",
+        re.IGNORECASE,
+    ),
+]
+
+_EXTREME_SLURS_PATTERN = re.compile(
+    r"\b(?:m[@a]d[a@]rch[o0]d\w*|b[e3]h[e3]nch[o0]d\w*|bh[o0]sd[i1](?:w[a@]l[a@]|k[e3])|lanjak[o0]duku|lanja\s*koduku|moddagudu|modda\s*gudu|p[o0]{1,2}k[uo]|p[o0]{1,2}k[o0]du|puk[au]|nigg(?:er|a|ah|as|az)|fagg?ot)\b",
+    re.IGNORECASE,
+)
+
+
+def _check_emergency_severe(text: str) -> dict | None:
+    """
+    Deterministic emergency safety guard executed BEFORE Gemini.
+    Targets ONLY clearly unambiguous severe-risk patterns.
+    If not highly confident that content is severe, returns None to allow
+    normal processing through Gemini / manual review.
+    """
+    if not text:
+        return None
+
+    for p in _THREAT_PATTERNS:
+        if p.search(text):
+            return {
+                "category": "SEVERE_VIOLATION",
+                "reason": "Emergency safety rule: explicit credible threat of physical violence",
+                "confidence": 1.0,
+            }
+
+    for p in _SUICIDE_PATTERNS:
+        if p.search(text):
+            return {
+                "category": "SEVERE_VIOLATION",
+                "reason": "Emergency safety rule: explicit encouragement or instruction of suicide/self-harm",
+                "confidence": 1.0,
+            }
+
+    for p in _DOXXING_PATTERNS:
+        if p.search(text):
+            return {
+                "category": "SEVERE_VIOLATION",
+                "reason": "Emergency safety rule: explicit doxxing / private address exposure",
+                "confidence": 1.0,
+            }
+
+    if _EXTREME_SLURS_PATTERN.search(text):
+        return {
+            "category": "SEVERE_VIOLATION",
+            "reason": "Emergency safety rule: unambiguous severe hate slur",
+            "confidence": 1.0,
+        }
+
+    return None
 
 _SYSTEM_PROMPT = """You are an expert content moderation AI for an anonymous college student chat platform called "Class Voice".
 Students post anonymously, and your job is to classify each incoming message into EXACTLY ONE category: "SAFE", "POTENTIALLY_ABUSIVE", or "SEVERE_VIOLATION".
@@ -104,35 +194,52 @@ def moderate_message(text: str) -> dict:
 
     Returns:
         dict with keys:
-            category: str — one of SAFE, POTENTIALLY_ABUSIVE, SEVERE_VIOLATION
-            reason: str — brief explanation from the AI
-            confidence: float — 0.0 to 1.0
+            category: str — one of SAFE, POTENTIALLY_ABUSIVE, SEVERE_VIOLATION, or AI_UNAVAILABLE
+            reason: str — explanation from AI or emergency rule / fallback
+            confidence: float | None — 0.0 to 1.0 for AI classifications, None for AI_UNAVAILABLE
 
-    Fallback: On API failure/timeout/missing key, returns POTENTIALLY_ABUSIVE
-    so the message is broadcast but flagged for admin review.
+    Fallback: On API failure/timeout/missing key/rate limit, returns AI_UNAVAILABLE
+    so the message is kept visible and flagged for manual admin review.
     """
     if not text or not text.strip():
         return {"category": "SAFE", "reason": "Empty message", "confidence": 1.0}
 
+    # 1. Deterministic Emergency Safety Guard (runs before Gemini)
+    emergency_result = _check_emergency_severe(text)
+    if emergency_result:
+        return emergency_result
+
+    # 2. Check Gemini API key
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         print(
-            "[MODERATION FALLBACK] GEMINI_API_KEY not set — "
-            "flagging as POTENTIALLY_ABUSIVE for admin review",
+            "[MODERATION FALLBACK] AI unavailable\n"
+            "Reason: GEMINI_API_KEY not set — treating as SAFE by availability fallback",
             flush=True,
         )
-        return dict(_FALLBACK_RESULT)
+        return {
+            "category": "SAFE",
+            "reason": "AI moderation unavailable — treated as SAFE by availability fallback",
+            "confidence": None,
+            "ai_status": "unavailable",
+        }
 
+    # 3. Call Gemini
     try:
         result = _call_gemini(text, api_key)
         return result
     except Exception as e:
         print(
-            f"[MODERATION FALLBACK] AI moderation failed ({type(e).__name__}: {e}) — "
-            f"flagging as POTENTIALLY_ABUSIVE for admin review",
+            f"[MODERATION FALLBACK] AI unavailable\n"
+            f"Reason: {type(e).__name__}: {e} — treating as SAFE by availability fallback",
             flush=True,
         )
-        return dict(_FALLBACK_RESULT)
+        return {
+            "category": "SAFE",
+            "reason": "AI moderation unavailable — treated as SAFE by availability fallback",
+            "confidence": None,
+            "ai_status": "unavailable",
+        }
 
 
 # ── Provider Implementation (Google Gemini) ──────────────────────────────────

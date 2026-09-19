@@ -196,19 +196,37 @@
     let html = '';
     reviews.forEach(r => {
       const timeStr = formatLocalDateTime(r.created_at);
-      const confidencePct = (r.confidence * 100).toFixed(0);
+      const isUnavailable = (r.category === 'AI_UNAVAILABLE');
+      
+      let badgeHtml = '';
+      let metaHtml = '';
+      
+      if (isUnavailable) {
+        badgeHtml = `<span class="moderation-badge moderation-badge-unavailable">AI Unavailable</span>`;
+        metaHtml = `
+          <div class="moderation-meta">
+            <span class="moderation-reason" style="color: #B45309;"><strong>Status:</strong> AI moderation unavailable — Manual review required</span>
+            <span class="moderation-confidence"><strong>Review required:</strong> Yes</span>
+          </div>`;
+      } else {
+        const confidencePct = (r.confidence !== null && r.confidence !== undefined) ? `${(r.confidence * 100).toFixed(0)}%` : 'N/A';
+        badgeHtml = `<span class="moderation-badge">${(r.category || '').replace('_', ' ')}</span>`;
+        metaHtml = `
+          <div class="moderation-meta">
+            <span class="moderation-reason"><strong>Reason:</strong> ${r.reason || 'N/A'}</span>
+            <span class="moderation-confidence"><strong>Confidence:</strong> ${confidencePct}</span>
+          </div>`;
+      }
+
       html += `
         <div class="moderation-card" id="mod-card-${r.id}">
           <div class="moderation-card-header">
-            <span class="moderation-badge">${r.category.replace('_', ' ')}</span>
+            ${badgeHtml}
             <span class="moderation-time">${timeStr}</span>
           </div>
           <div class="moderation-card-body">
             <div class="moderation-message">${r.message}</div>
-            <div class="moderation-meta">
-              <span class="moderation-reason"><strong>Reason:</strong> ${r.reason || 'N/A'}</span>
-              <span class="moderation-confidence"><strong>Confidence:</strong> ${confidencePct}%</span>
-            </div>
+            ${metaHtml}
           </div>
           <div class="moderation-card-actions">
             <button class="btn-fine" onclick="moderationAction(${r.id}, 'approve', this)">Fine</button>
