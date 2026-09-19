@@ -23,7 +23,7 @@
     {% if session.get('user_id') %}
     <div class="nav-right">
       {% if session.get('is_admin') %}
-        <a href="{{ url_for('admin_dashboard') }}" class="nav-admin-link">Staff Admin</a>
+        <a href="{{ url_for('admin_dashboard') }}" class="nav-admin-link">Admin</a>
       {% endif %}
       <span class="nav-user-label">{{ session.get('user_name', 'Student') }}</span>
       <a href="{{ url_for('logout') }}" class="nav-link">Sign out</a>
