@@ -627,39 +627,46 @@ class TestModeration(unittest.TestCase):
             sess['is_admin'] = True
 
         # Simulate Gemini failure (HTTP 429 quota)
-        with patch("moderation._call_gemini", side_effect=RuntimeError("Gemini API returned HTTP 429: RESOURCE_EXHAUSTED")), \
-             patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}), \
-             patch("app.MODERATION_ENABLED", True):
+        old_key = os.environ.get("GEMINI_API_KEY")
+        os.environ["GEMINI_API_KEY"] = "test-key"
+        try:
+            with patch("moderation._call_gemini", side_effect=RuntimeError("Gemini API returned HTTP 429: RESOURCE_EXHAUSTED")), \
+                 patch("app.MODERATION_ENABLED", True):
 
-            s1 = socketio.test_client(app, flask_test_client=client1)
-            s2 = socketio.test_client(app, flask_test_client=client2)
+                s1 = socketio.test_client(app, flask_test_client=client1)
+                s2 = socketio.test_client(app, flask_test_client=client2)
 
-            s1.emit('send_message', {'message': 'hey bro send me notes'})
-            time.sleep(0.2)
+                s1.emit('send_message', {'message': 'hey bro send me notes'})
+                time.sleep(0.2)
 
-            # Client 2 should receive new_message immediately
-            received_by_s2 = s2.get_received()
-            new_msgs = [e for e in received_by_s2 if e['name'] == 'new_message']
-            self.assertEqual(len(new_msgs), 1)
-            post_id = new_msgs[0]['args'][0]['id']
+                # Client 2 should receive new_message immediately
+                received_by_s2 = s2.get_received()
+                new_msgs = [e for e in received_by_s2 if e['name'] == 'new_message']
+                self.assertEqual(len(new_msgs), 1)
+                post_id = new_msgs[0]['args'][0]['id']
 
-            # Message must NOT be deleted
-            del_events = [e for e in received_by_s2 if e['name'] == 'message_deleted']
-            self.assertEqual(len(del_events), 0, "Normal message during AI outage must NOT be deleted")
+                # Message must NOT be deleted
+                del_events = [e for e in received_by_s2 if e['name'] == 'message_deleted']
+                self.assertEqual(len(del_events), 0, "Normal message during AI outage must NOT be deleted")
 
-            # Admin must NOT receive any moderation_review_new events for normal message!
-            admin_review_events = [e for e in received_by_s2 if e['name'] == 'moderation_review_new']
-            self.assertEqual(len(admin_review_events), 0, "Admin must NOT receive review event for normal message during outage")
+                # Admin must NOT receive any moderation_review_new events for normal message!
+                admin_review_events = [e for e in received_by_s2 if e['name'] == 'moderation_review_new']
+                self.assertEqual(len(admin_review_events), 0, "Admin must NOT receive review event for normal message during outage")
 
-            # Verify in DB: message exists and is visible (deleted=0), NO review row exists!
-            with get_db() as conn:
-                post = conn.execute("SELECT deleted FROM posts WHERE id=?", (post_id,)).fetchone()
-                self.assertEqual(post["deleted"], 0)
-                review = conn.execute("SELECT id FROM moderation_reviews WHERE post_id=?", (post_id,)).fetchone()
-                self.assertIsNone(review, "Normal message during 429 outage must NOT create a moderation review")
+                # Verify in DB: message exists and is visible (deleted=0), NO review row exists!
+                with get_db() as conn:
+                    post = conn.execute("SELECT deleted FROM posts WHERE id=?", (post_id,)).fetchone()
+                    self.assertEqual(post["deleted"], 0)
+                    review = conn.execute("SELECT id FROM moderation_reviews WHERE post_id=?", (post_id,)).fetchone()
+                    self.assertIsNone(review, "Normal message during 429 outage must NOT create a moderation review")
 
-            s1.disconnect()
-            s2.disconnect()
+                s1.disconnect()
+                s2.disconnect()
+        finally:
+            if old_key is None:
+                os.environ.pop("GEMINI_API_KEY", None)
+            else:
+                os.environ["GEMINI_API_KEY"] = old_key
 
         print("[SUCCESS] Normal message during 429 outage stays visible with NO review created.")
 
@@ -697,6 +704,97 @@ class TestModeration(unittest.TestCase):
 
         s_student.disconnect()
         print("[SUCCESS] Real-time deletion on moderation reject test passed.")
+
+    def test_cleanup_expired_post_without_moderation_review(self):
+        """Verify cleanup deletes expired posts that have no moderation reviews."""
+        from app import run_cleanup_cycle, get_db
+
+        with get_db() as conn:
+            conn.execute("INSERT OR IGNORE INTO posts (id, user_id, message, created_at, deleted) VALUES (9020, 900, 'unreviewed expired msg', '2020-01-01 00:00:00', 0)")
+            conn.commit()
+
+        run_cleanup_cycle()
+
+        with get_db() as conn:
+            post = conn.execute("SELECT id FROM posts WHERE id=9020").fetchone()
+            self.assertIsNone(post, "Expired post without review should be deleted by cleanup")
+
+        print("[SUCCESS] Expired post with no moderation review deleted cleanly.")
+
+    def test_cleanup_expired_post_with_moderation_review_preserves_history_and_no_fk_error(self):
+        """Verify cleanup deletes expired posts referencing moderation_reviews without FK violation,
+        while preserving all review audit data with unlinked post_id."""
+        from app import run_cleanup_cycle, get_db
+
+        with get_db() as conn:
+            # Enable SQLite foreign key constraints to strictly emulate PostgreSQL FK enforcement
+            conn.execute("PRAGMA foreign_keys = ON")
+            fk_enabled = conn.execute("PRAGMA foreign_keys").fetchone()[0]
+            self.assertEqual(fk_enabled, 1, "Foreign keys should be active for strict verification")
+
+            conn.execute("INSERT OR IGNORE INTO posts (id, user_id, message, created_at, deleted) VALUES (9021, 900, 'reviewed expired msg', '2020-01-01 00:00:00', 0)")
+            conn.execute(
+                "INSERT OR IGNORE INTO moderation_reviews (id, post_id, user_id, category, reason, confidence, status, created_at, reviewed_at, reviewed_by, action) "
+                "VALUES (9021, 9021, 900, 'POTENTIALLY_ABUSIVE', 'Flagged mild insult', 0.85, 'approved', '2020-01-01 00:00:00', '2020-01-01 00:05:00', 901, 'kept')"
+            )
+            conn.commit()
+
+        # Run cleanup cycle - must execute without throwing SQLite or PostgreSQL FK constraint violations
+        run_cleanup_cycle()
+
+        with get_db() as conn:
+            conn.execute("PRAGMA foreign_keys = ON")
+            # 1. Post must be deleted
+            post = conn.execute("SELECT id FROM posts WHERE id=9021").fetchone()
+            self.assertIsNone(post, "Expired post must be deleted from posts table")
+
+            # 2. Moderation review record must be preserved for audit purposes
+            review = conn.execute("SELECT id, post_id, user_id, category, reason, confidence, status, action FROM moderation_reviews WHERE id=9021").fetchone()
+            self.assertIsNotNone(review, "Moderation review record must be retained for audit history")
+            self.assertIsNone(review["post_id"], "Review post_id must be safely set to NULL (no dangling foreign key)")
+            self.assertEqual(review["user_id"], 900)
+            self.assertEqual(review["category"], "POTENTIALLY_ABUSIVE")
+            self.assertEqual(review["reason"], "Flagged mild insult")
+            self.assertEqual(review["confidence"], 0.85)
+            self.assertEqual(review["status"], "approved")
+            self.assertEqual(review["action"], "kept")
+
+            # 3. Verify no foreign key violations remain in the database
+            fk_violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+            self.assertEqual(len(fk_violations), 0, f"Database has dangling/violating foreign keys: {fk_violations}")
+
+        print("[SUCCESS] Expired post with moderation review deleted without FK violation and review history preserved.")
+
+    def test_cleanup_expired_post_with_pending_review_auto_resolves(self):
+        """Verify cleanup auto-resolves any lingering pending review and unlinks post_id safely."""
+        from app import run_cleanup_cycle, get_db
+
+        with get_db() as conn:
+            conn.execute("PRAGMA foreign_keys = ON")
+            conn.execute("INSERT OR IGNORE INTO posts (id, user_id, message, created_at, deleted) VALUES (9022, 900, 'pending expired msg', '2020-01-01 00:00:00', 0)")
+            conn.execute(
+                "INSERT OR IGNORE INTO moderation_reviews (id, post_id, user_id, category, reason, confidence, status, created_at) "
+                "VALUES (9022, 9022, 900, 'POTENTIALLY_ABUSIVE', 'Pending test', 0.70, 'pending', '2020-01-01 00:00:00')"
+            )
+            conn.commit()
+
+        run_cleanup_cycle()
+
+        with get_db() as conn:
+            conn.execute("PRAGMA foreign_keys = ON")
+            post = conn.execute("SELECT id FROM posts WHERE id=9022").fetchone()
+            self.assertIsNone(post, "Expired post must be deleted")
+
+            review = conn.execute("SELECT id, post_id, status, action FROM moderation_reviews WHERE id=9022").fetchone()
+            self.assertIsNotNone(review, "Review record must be retained")
+            self.assertIsNone(review["post_id"], "post_id must be NULL")
+            self.assertEqual(review["status"], "approved", "Lingering pending review on expired post should be auto-approved")
+            self.assertEqual(review["action"], "auto_approved")
+
+            fk_violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+            self.assertEqual(len(fk_violations), 0)
+
+        print("[SUCCESS] Expired post with pending review auto-resolves and unlinks safely.")
 
 
 if __name__ == '__main__':

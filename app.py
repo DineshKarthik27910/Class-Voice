@@ -275,7 +275,7 @@ def init_db():
 
             CREATE TABLE IF NOT EXISTS moderation_reviews (
                 id          SERIAL PRIMARY KEY,
-                post_id     INTEGER NOT NULL REFERENCES posts(id),
+                post_id     INTEGER REFERENCES posts(id) ON DELETE SET NULL,
                 user_id     INTEGER NOT NULL REFERENCES users(id),
                 category    TEXT NOT NULL,
                 reason      TEXT,
@@ -301,6 +301,20 @@ def init_db():
                 conn.execute("ALTER TABLE users ADD COLUMN is_muted INTEGER NOT NULL DEFAULT 0")
             if "is_banned" not in columns:
                 conn.execute("ALTER TABLE users ADD COLUMN is_banned INTEGER NOT NULL DEFAULT 0")
+
+            # Ensure post_id in moderation_reviews is nullable for safe retention on post cleanup
+            mr_col = conn.execute("""
+                SELECT is_nullable 
+                FROM information_schema.columns 
+                WHERE table_name = 'moderation_reviews' AND column_name = 'post_id'
+            """).fetchone()
+            if mr_col:
+                is_null = mr_col["is_nullable"] if isinstance(mr_col, dict) or hasattr(mr_col, '__getitem__') else mr_col[0]
+                if str(is_null).upper() == "NO":
+                    try:
+                        conn.execute("ALTER TABLE moderation_reviews ALTER COLUMN post_id DROP NOT NULL")
+                    except Exception as e:
+                        print(f"[DB] Migration drop NOT NULL on moderation_reviews.post_id: {e}", flush=True)
                 
             admin_exists = conn.execute("SELECT 1 FROM users WHERE is_admin = 1 LIMIT 1").fetchone()
             if not admin_exists:
@@ -361,7 +375,7 @@ def init_db():
 
             CREATE TABLE IF NOT EXISTS moderation_reviews (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                post_id     INTEGER NOT NULL REFERENCES posts(id),
+                post_id     INTEGER REFERENCES posts(id) ON DELETE SET NULL,
                 user_id     INTEGER NOT NULL REFERENCES users(id),
                 category    TEXT NOT NULL,
                 reason      TEXT,
@@ -382,6 +396,34 @@ def init_db():
                 conn.execute("ALTER TABLE users ADD COLUMN is_muted INTEGER NOT NULL DEFAULT 0")
             if "is_banned" not in columns:
                 conn.execute("ALTER TABLE users ADD COLUMN is_banned INTEGER NOT NULL DEFAULT 0")
+
+            # Ensure post_id in moderation_reviews is nullable in existing SQLite databases
+            mr_info = conn.execute("PRAGMA table_info(moderation_reviews)").fetchall()
+            mr_cols = {row["name"]: row for row in mr_info}
+            if "post_id" in mr_cols and mr_cols["post_id"]["notnull"] == 1:
+                try:
+                    conn.executescript("""
+                        CREATE TABLE moderation_reviews_temp (
+                            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                            post_id     INTEGER REFERENCES posts(id) ON DELETE SET NULL,
+                            user_id     INTEGER NOT NULL REFERENCES users(id),
+                            category    TEXT NOT NULL,
+                            reason      TEXT,
+                            confidence  REAL,
+                            status      TEXT NOT NULL DEFAULT 'pending',
+                            created_at  TEXT NOT NULL,
+                            reviewed_at TEXT,
+                            reviewed_by INTEGER REFERENCES users(id),
+                            action      TEXT
+                        );
+                        INSERT INTO moderation_reviews_temp SELECT id, post_id, user_id, category, reason, confidence, status, created_at, reviewed_at, reviewed_by, action FROM moderation_reviews;
+                        DROP TABLE moderation_reviews;
+                        ALTER TABLE moderation_reviews_temp RENAME TO moderation_reviews;
+                        CREATE INDEX IF NOT EXISTS idx_moderation_post_id ON moderation_reviews (post_id);
+                        CREATE INDEX IF NOT EXISTS idx_moderation_status ON moderation_reviews (status);
+                    """)
+                except Exception as e:
+                    print(f"[DB] SQLite migration moderation_reviews post_id nullable: {e}", flush=True)
 
             posts = conn.execute("SELECT id, created_at FROM posts").fetchall()
             for post in posts:
@@ -1048,9 +1090,9 @@ def admin_moderation():
     with get_db() as conn:
         reviews = conn.execute("""
             SELECT mr.id, mr.post_id, mr.category, mr.reason, mr.confidence,
-                   mr.status, mr.created_at, p.message
+                   mr.status, mr.created_at, COALESCE(p.message, '[Expired message]') AS message
             FROM moderation_reviews mr
-            JOIN posts p ON mr.post_id = p.id
+            LEFT JOIN posts p ON mr.post_id = p.id
             WHERE mr.status = 'pending'
             ORDER BY mr.created_at DESC
         """).fetchall()
@@ -1440,62 +1482,77 @@ def handle_delete_message(data):
 def default_error_handler(e):
     print(f"[SOCKET ERROR] Error: {e}", flush=True)
 
+def run_cleanup_cycle():
+    """Execute a single cycle of expired message cleanup and review auto-approval."""
+    try:
+        with get_db() as conn:
+            if os.environ.get("DATABASE_URL"):
+                query = "SELECT id, filename FROM posts WHERE CAST(created_at AS TIMESTAMPTZ) < NOW() - INTERVAL '1 hour'"
+            else:
+                query = "SELECT id, filename FROM posts WHERE datetime(created_at) < datetime('now', '-1 hour')"
+            expired_posts = conn.execute(query).fetchall()
+            
+            if expired_posts:
+                print(f"[CLEANUP] Found {len(expired_posts)} expired messages.", flush=True)
+                now_str = datetime.now(timezone.utc).isoformat()
+                for post in expired_posts:
+                    post_id = post["id"]
+                    filename = post["filename"]
+                    
+                    if filename:
+                        file_path = os.path.join(app.config["UPLOAD_FOLDER"], filename)
+                        if os.path.exists(file_path):
+                            try:
+                                os.remove(file_path)
+                                print(f"[CLEANUP] Deleted file: {file_path}", flush=True)
+                            except Exception as e:
+                                print(f"[CLEANUP] Error deleting file {file_path}: {e}", flush=True)
+                                
+                    # ── Data retention: handle moderation review references safely ────
+                    # 1. If any review for this expired post is still 'pending', auto-resolve it
+                    conn.execute(
+                        "UPDATE moderation_reviews SET status='approved', action='auto_approved', reviewed_at=COALESCE(reviewed_at, ?) "
+                        "WHERE post_id=? AND status='pending'",
+                        (now_str, post_id)
+                    )
+                    # 2. Safely disassociate post_id to preserve audit history and prevent FK constraint violations / dangling FKs
+                    conn.execute("UPDATE moderation_reviews SET post_id = NULL WHERE post_id = ?", (post_id,))
+
+                    conn.execute("DELETE FROM posts WHERE id=?", (post_id,))
+                    print(f"[CLEANUP] Deleted message ID {post_id} from database.", flush=True)
+                    socketio.emit('message_deleted', {'id': post_id})
+                conn.commit()
+    except Exception as e:
+        print(f"[CLEANUP] Error during cleanup: {e}", flush=True)
+    
+    # ── Auto-approve expired moderation reviews ─────────────────────
+    try:
+        auto_approve_at = datetime.now(timezone.utc) - timedelta(minutes=MODERATION_REVIEW_MINUTES)
+        cutoff = auto_approve_at.isoformat()
+        with get_db() as conn:
+            pending = conn.execute(
+                "SELECT id, post_id FROM moderation_reviews WHERE status='pending' AND created_at < ?",
+                (cutoff,)
+            ).fetchall()
+            if pending:
+                now_str = datetime.now(timezone.utc).isoformat()
+                for review in pending:
+                    conn.execute(
+                        "UPDATE moderation_reviews SET status='approved', action='auto_approved', reviewed_at=? WHERE id=?",
+                        (now_str, review["id"])
+                    )
+                    print(f"[MODERATION] Auto-approved review #{review['id']} for post #{review['post_id']} "
+                          f"(exceeded {MODERATION_REVIEW_MINUTES}min review window)", flush=True)
+                conn.commit()
+                emit_to_admins('moderation_review_resolved', {'id': None, 'action': 'auto_approved_batch'})
+    except Exception as e:
+        print(f"[MODERATION] Error during auto-approve cleanup: {e}", flush=True)
+
 def cleanup_expired_messages():
     print("[CLEANUP] Background task started.", flush=True)
     while True:
         socketio.sleep(60)
-        try:
-            with get_db() as conn:
-                if os.environ.get("DATABASE_URL"):
-                    query = "SELECT id, filename FROM posts WHERE CAST(created_at AS TIMESTAMPTZ) < NOW() - INTERVAL '1 hour'"
-                else:
-                    query = "SELECT id, filename FROM posts WHERE datetime(created_at) < datetime('now', '-1 hour')"
-                expired_posts = conn.execute(query).fetchall()
-                
-                if expired_posts:
-                    print(f"[CLEANUP] Found {len(expired_posts)} expired messages.", flush=True)
-                    for post in expired_posts:
-                        post_id = post["id"]
-                        filename = post["filename"]
-                        
-                        if filename:
-                            file_path = os.path.join(app.config["UPLOAD_FOLDER"], filename)
-                            if os.path.exists(file_path):
-                                try:
-                                    os.remove(file_path)
-                                    print(f"[CLEANUP] Deleted file: {file_path}", flush=True)
-                                except Exception as e:
-                                    print(f"[CLEANUP] Error deleting file {file_path}: {e}", flush=True)
-                                    
-                        conn.execute("DELETE FROM posts WHERE id=?", (post_id,))
-                        print(f"[CLEANUP] Deleted message ID {post_id} from database.", flush=True)
-                        socketio.emit('message_deleted', {'id': post_id})
-                    conn.commit()
-        except Exception as e:
-            print(f"[CLEANUP] Error during cleanup: {e}", flush=True)
-        
-        # ── Auto-approve expired moderation reviews ─────────────────────
-        try:
-            auto_approve_at = datetime.now(timezone.utc) - timedelta(minutes=MODERATION_REVIEW_MINUTES)
-            cutoff = auto_approve_at.isoformat()
-            with get_db() as conn:
-                pending = conn.execute(
-                    "SELECT id, post_id FROM moderation_reviews WHERE status='pending' AND created_at < ?",
-                    (cutoff,)
-                ).fetchall()
-                if pending:
-                    now_str = datetime.now(timezone.utc).isoformat()
-                    for review in pending:
-                        conn.execute(
-                            "UPDATE moderation_reviews SET status='approved', action='auto_approved', reviewed_at=? WHERE id=?",
-                            (now_str, review["id"])
-                        )
-                        print(f"[MODERATION] Auto-approved review #{review['id']} for post #{review['post_id']} "
-                              f"(exceeded {MODERATION_REVIEW_MINUTES}min review window)", flush=True)
-                    conn.commit()
-                    emit_to_admins('moderation_review_resolved', {'id': None, 'action': 'auto_approved_batch'})
-        except Exception as e:
-            print(f"[MODERATION] Error during auto-approve cleanup: {e}", flush=True)
+        run_cleanup_cycle()
 
 cleanup_task_started = False
 cleanup_task_lock = threading.Lock()
