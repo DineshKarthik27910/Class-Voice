@@ -68,6 +68,10 @@ SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD")
 ALLOW_CONSOLE_OTP = os.environ.get("ALLOW_CONSOLE_OTP", "false").lower() == "true"
 FLASK_ENV = os.environ.get("FLASK_ENV", "development")
 
+# AI Moderation Configuration
+MODERATION_ENABLED = os.environ.get("MODERATION_ENABLED", "true").lower() == "true"
+MODERATION_REVIEW_MINUTES = int(os.environ.get("MODERATION_REVIEW_MINUTES", "15"))
+
 # Initialize SocketIO
 socketio = SocketIO(app, cors_allowed_origins="*", manage_session=True, async_mode='threading')
 
@@ -215,7 +219,7 @@ def get_db():
             pg_conn = psycopg2.connect(database_url)
             return SQLiteCompatiblePostgreSQLConnection(pg_conn)
     else:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=20.0)
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -268,6 +272,23 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_posts_user_id ON posts (user_id);
             CREATE INDEX IF NOT EXISTS idx_admin_log_admin_id ON admin_log (admin_id);
             CREATE INDEX IF NOT EXISTS idx_admin_log_ts ON admin_log (ts);
+
+            CREATE TABLE IF NOT EXISTS moderation_reviews (
+                id          SERIAL PRIMARY KEY,
+                post_id     INTEGER NOT NULL REFERENCES posts(id),
+                user_id     INTEGER NOT NULL REFERENCES users(id),
+                category    TEXT NOT NULL,
+                reason      TEXT,
+                confidence  REAL,
+                status      TEXT NOT NULL DEFAULT 'pending',
+                created_at  TEXT NOT NULL,
+                reviewed_at TEXT,
+                reviewed_by INTEGER REFERENCES users(id),
+                action      TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_moderation_post_id ON moderation_reviews (post_id);
+            CREATE INDEX IF NOT EXISTS idx_moderation_status ON moderation_reviews (status);
             """)
             
             cursor = conn.execute("""
@@ -337,6 +358,23 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_posts_user_id ON posts (user_id);
             CREATE INDEX IF NOT EXISTS idx_admin_log_admin_id ON admin_log (admin_id);
             CREATE INDEX IF NOT EXISTS idx_admin_log_ts ON admin_log (ts);
+
+            CREATE TABLE IF NOT EXISTS moderation_reviews (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                post_id     INTEGER NOT NULL REFERENCES posts(id),
+                user_id     INTEGER NOT NULL REFERENCES users(id),
+                category    TEXT NOT NULL,
+                reason      TEXT,
+                confidence  REAL,
+                status      TEXT NOT NULL DEFAULT 'pending',
+                created_at  TEXT NOT NULL,
+                reviewed_at TEXT,
+                reviewed_by INTEGER REFERENCES users(id),
+                action      TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_moderation_post_id ON moderation_reviews (post_id);
+            CREATE INDEX IF NOT EXISTS idx_moderation_status ON moderation_reviews (status);
             """)
             cursor = conn.execute("PRAGMA table_info(users)")
             columns = [row["name"] for row in cursor.fetchall()]
@@ -373,12 +411,27 @@ def init_db():
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 init_db()
 
+# Import moderation service (after init_db so DB is ready)
+from moderation import moderate_message
+
 def log_admin_action(admin_id, action, target_id=None, note=None):
     with get_db() as conn:
         conn.execute(
             "INSERT INTO admin_log (admin_id, action, target_id, note) VALUES (?,?,?,?)",
             (admin_id, action, target_id, note)
         )
+
+def emit_to_admins(event, data):
+    """Emit a Socket.IO event only to connected admin sessions."""
+    for uid, sids in list(connected_users.items()):
+        try:
+            with get_db() as conn:
+                user = conn.execute("SELECT is_admin FROM users WHERE id=?", (uid,)).fetchone()
+            if user and user['is_admin']:
+                for sid in list(sids):
+                    socketio.emit(event, data, to=sid)
+        except Exception as e:
+            print(f"[MODERATION] Error emitting to admin user {uid}: {e}", flush=True)
 
 # ── Auth helpers ─────────────────────────────────────────────────────────────
 
@@ -782,20 +835,18 @@ def feed():
             session.clear()
             return redirect(url_for("login"))
             
-        # Load message history with is_admin flag for sender
+        # Load message history (no is_admin to keep admin identity hidden)
         if os.environ.get("DATABASE_URL"):
             query = """
-                SELECT p.id, p.user_id, p.message, p.filename, p.orig_name, p.created_at, u.is_admin AS is_admin
+                SELECT p.id, p.user_id, p.message, p.filename, p.orig_name, p.created_at
                 FROM posts p
-                JOIN users u ON p.user_id = u.id
                 WHERE p.deleted = 0 AND CAST(p.created_at AS TIMESTAMPTZ) >= NOW() - INTERVAL '1 hour'
                 ORDER BY p.created_at ASC
             """
         else:
             query = """
-                SELECT p.id, p.user_id, p.message, p.filename, p.orig_name, p.created_at, u.is_admin AS is_admin
+                SELECT p.id, p.user_id, p.message, p.filename, p.orig_name, p.created_at
                 FROM posts p
-                JOIN users u ON p.user_id = u.id
                 WHERE p.deleted = 0 AND datetime(p.created_at) >= datetime('now', '-1 hour')
                 ORDER BY p.created_at ASC
             """
@@ -875,8 +926,12 @@ def admin_dashboard():
             ORDER BY l.ts DESC
         """).fetchall()
         
+        pending_moderation_count = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM moderation_reviews WHERE status='pending'"
+        ).fetchone()["cnt"]
+        
     log_admin_action(session["user_id"], "VIEW_DASHBOARD")
-    return render_template("admin.html", posts=posts, users=users, logs=logs)
+    return render_template("admin.html", posts=posts, users=users, logs=logs, pending_moderation_count=pending_moderation_count)
 
 @app.route("/admin/reveal-identity/<int:post_id>", methods=["POST"])
 @admin_required
@@ -982,6 +1037,82 @@ def admin_unban_user(user_id):
         conn.execute("UPDATE users SET is_banned=0 WHERE id=?", (user_id,))
         
     log_admin_action(session["user_id"], "UNBAN_USER", target_id=user_id, note=f"Unbanned student {user['name']}")
+    return {"success": True}
+
+# ── Routes: Admin Moderation ──────────────────────────────────────────────────
+
+@app.route("/admin/moderation")
+@admin_required
+def admin_moderation():
+    """Return pending moderation reviews as JSON."""
+    with get_db() as conn:
+        reviews = conn.execute("""
+            SELECT mr.id, mr.post_id, mr.category, mr.reason, mr.confidence,
+                   mr.status, mr.created_at, p.message
+            FROM moderation_reviews mr
+            JOIN posts p ON mr.post_id = p.id
+            WHERE mr.status = 'pending'
+            ORDER BY mr.created_at DESC
+        """).fetchall()
+    result = []
+    for r in reviews:
+        result.append({
+            "id": r["id"],
+            "post_id": r["post_id"],
+            "message": r["message"],
+            "category": r["category"],
+            "reason": r["reason"],
+            "confidence": r["confidence"],
+            "created_at": r["created_at"],
+        })
+    return {"reviews": result}
+
+@app.route("/admin/moderation/approve/<int:review_id>", methods=["POST"])
+@admin_required
+def admin_moderation_approve(review_id):
+    """Mark a moderation review as approved (Fine). Message stays visible."""
+    reviewed_at = datetime.now(timezone.utc).isoformat()
+    admin_id = session["user_id"]
+    with get_db() as conn:
+        review = conn.execute(
+            "SELECT id, post_id, status FROM moderation_reviews WHERE id=?", (review_id,)
+        ).fetchone()
+        if not review:
+            return {"error": "Review not found."}, 404
+        if review["status"] != "pending":
+            return {"error": "Review already resolved."}, 400
+        conn.execute(
+            "UPDATE moderation_reviews SET status='approved', reviewed_at=?, reviewed_by=?, action='kept' WHERE id=?",
+            (reviewed_at, admin_id, review_id)
+        )
+    log_admin_action(admin_id, "MODERATION_APPROVE", target_id=review["post_id"],
+                     note=f"Approved moderation review #{review_id} for post #{review['post_id']}")
+    emit_to_admins('moderation_review_resolved', {'id': review_id, 'action': 'approved'})
+    return {"success": True}
+
+@app.route("/admin/moderation/reject/<int:review_id>", methods=["POST"])
+@admin_required
+def admin_moderation_reject(review_id):
+    """Mark a moderation review as rejected (Delete). Removes message in real-time."""
+    reviewed_at = datetime.now(timezone.utc).isoformat()
+    admin_id = session["user_id"]
+    with get_db() as conn:
+        review = conn.execute(
+            "SELECT id, post_id, status FROM moderation_reviews WHERE id=?", (review_id,)
+        ).fetchone()
+        if not review:
+            return {"error": "Review not found."}, 404
+        if review["status"] != "pending":
+            return {"error": "Review already resolved."}, 400
+        conn.execute(
+            "UPDATE moderation_reviews SET status='rejected', reviewed_at=?, reviewed_by=?, action='deleted' WHERE id=?",
+            (reviewed_at, admin_id, review_id)
+        )
+        conn.execute("UPDATE posts SET deleted=1 WHERE id=?", (review["post_id"],))
+    log_admin_action(admin_id, "MODERATION_REJECT", target_id=review["post_id"],
+                     note=f"Rejected moderation review #{review_id} — deleted post #{review['post_id']}")
+    socketio.emit('message_deleted', {'id': review["post_id"]})
+    emit_to_admins('moderation_review_resolved', {'id': review_id, 'action': 'rejected'})
     return {"success": True}
 
 # ── Seed admin (dev only) ─────────────────────────────────────────────────────
@@ -1102,29 +1233,200 @@ def handle_send_message(data):
         return
         
     message_escaped = html.escape(message)
-    
     created_at = datetime.now(timezone.utc).isoformat()
+    
+    # 1. Save message normally (instant write)
     sql = "INSERT INTO posts (user_id, message, filename, orig_name, created_at) VALUES (?,?,?,?,?)"
     if os.environ.get("DATABASE_URL"):
         sql += " RETURNING id"
     with get_db() as conn:
-        cursor = conn.execute(
-            sql,
-            (user_id, message_escaped, filename, orig_name, created_at)
-        )
+        cursor = conn.execute(sql, (user_id, message_escaped, filename, orig_name, created_at))
         post_id = cursor.lastrowid
         
     print(f"[SOCKET MESSAGE] User ID: {user_id} sent message (Post ID: {post_id}, Length: {len(message_escaped)}, File: {orig_name})", flush=True)
         
+    # 2. Broadcast message immediately through Socket.IO (instant appearance)
     socketio.emit('new_message', {
         'id': post_id,
         'user_id': user_id,
         'message': message_escaped,
         'filename': filename,
         'orig_name': orig_name,
-        'created_at': created_at,
-        'is_admin': bool(user['is_admin'])
+        'created_at': created_at
     })
+    
+    # 3. Run Gemini moderation asynchronously in the background
+    if MODERATION_ENABLED and message:
+        sender_sid = getattr(request, 'sid', None)
+        socketio.start_background_task(
+            async_moderate_post,
+            post_id,
+            user_id,
+            message,
+            message_escaped,
+            created_at,
+            sender_sid
+        )
+
+def async_moderate_post(post_id, user_id, message, message_escaped, created_at, sender_sid=None):
+    """Run Gemini moderation asynchronously in background after message is broadcast immediately."""
+    with app.app_context():
+        try:
+            mod_result = moderate_message(message)
+            print(f"[MODERATION] Async result for Post #{post_id} (User ID {user_id}): {mod_result['category']} "
+                  f"(confidence={mod_result['confidence']:.2f}, reason={mod_result['reason'][:80]})", flush=True)
+        except Exception as e:
+            print(f"[MODERATION ERROR] Post #{post_id}: {e}", flush=True)
+            mod_result = {
+                "category": "POTENTIALLY_ABUSIVE",
+                "reason": f"AI moderation service error: {str(e)}",
+                "confidence": 0.50
+            }
+
+        category = mod_result.get("category", "SAFE")
+
+        # ── SAFE: Do nothing. Message remains visible. ───────────────────
+        if category == "SAFE":
+            return
+
+        # ── POTENTIALLY_ABUSIVE: Message remains visible, create review, notify admins
+        elif category == "POTENTIALLY_ABUSIVE":
+            with get_db() as conn:
+                # Ensure post wasn't deleted in the meantime
+                post = conn.execute("SELECT id, deleted FROM posts WHERE id=?", (post_id,)).fetchone()
+                if not post or post["deleted"]:
+                    return
+                mr_sql = ("INSERT INTO moderation_reviews "
+                          "(post_id, user_id, category, reason, confidence, status, created_at) "
+                          "VALUES (?,?,?,?,?,?,?)")
+                if os.environ.get("DATABASE_URL"):
+                    mr_sql += " RETURNING id"
+                cursor = conn.execute(mr_sql, (
+                    post_id, user_id, mod_result["category"], mod_result["reason"],
+                    mod_result["confidence"], "pending", created_at
+                ))
+                review_id = cursor.lastrowid
+
+            print(f"[MODERATION] POTENTIALLY_ABUSIVE — Review #{review_id} created for Post #{post_id}", flush=True)
+            emit_to_admins('moderation_review_new', {
+                'id': review_id,
+                'post_id': post_id,
+                'message': message_escaped,
+                'category': mod_result["category"],
+                'reason': mod_result["reason"],
+                'confidence': mod_result["confidence"],
+                'created_at': created_at,
+            })
+
+        # ── SEVERE_VIOLATION: Delete post in real time, emit message_deleted, warn sender, audit
+        elif category == "SEVERE_VIOLATION":
+            with get_db() as conn:
+                conn.execute("UPDATE posts SET deleted=1 WHERE id=?", (post_id,))
+                mr_sql = ("INSERT INTO moderation_reviews "
+                          "(post_id, user_id, category, reason, confidence, status, created_at, action) "
+                          "VALUES (?,?,?,?,?,?,?,?)")
+                if os.environ.get("DATABASE_URL"):
+                    mr_sql += " RETURNING id"
+                conn.execute(mr_sql, (
+                    post_id, user_id, mod_result["category"], mod_result["reason"],
+                    mod_result["confidence"], "rejected", created_at, "auto_rejected"
+                ))
+
+            log_admin_action(
+                user_id, "AUTO_REJECT_SEVERE", target_id=post_id,
+                note=f"AI auto-rejected severe message (Post #{post_id}): {mod_result['reason'][:100]}"
+            )
+            print(f"[MODERATION] SEVERE_VIOLATION — Post #{post_id} deleted in real time, warning sent to User ID {user_id}", flush=True)
+
+            # 1. Emit message_deleted to all connected clients
+            socketio.emit('message_deleted', {'id': post_id})
+
+            # 2. Show moderation warning to sender
+            target_sids = set(connected_users.get(user_id, set()))
+            if sender_sid:
+                target_sids.add(sender_sid)
+            for sid in target_sids:
+                try:
+                    socketio.emit('moderation_warning', {
+                        'message': 'Your message was removed because it violated Class Voice\'s community guidelines.'
+                    }, to=sid)
+                except Exception as e:
+                    print(f"[MODERATION] Error sending warning to sid {sid}: {e}", flush=True)
+
+@socketio.on('edit_message')
+def handle_edit_message(data):
+    if 'user_id' not in session:
+        return
+    user_id = session['user_id']
+
+    with get_db() as conn:
+        user = conn.execute("SELECT is_muted, is_banned FROM users WHERE id=?", (user_id,)).fetchone()
+    if not user or user['is_banned']:
+        disconnect()
+        return
+    if user['is_muted']:
+        emit('error', {'message': 'You are currently muted and cannot edit messages.'})
+        return
+
+    post_id = data.get('id')
+    new_message = data.get('message', '').strip()
+
+    if not post_id or not new_message:
+        emit('error', {'message': 'Message cannot be empty.'})
+        return
+
+    if len(new_message) > 2000:
+        emit('error', {'message': 'Message is too long (max 2000 characters).'})
+        return
+
+    message_escaped = html.escape(new_message)
+
+    with get_db() as conn:
+        post = conn.execute("SELECT id, user_id, deleted FROM posts WHERE id=?", (post_id,)).fetchone()
+        if not post or post['deleted']:
+            emit('error', {'message': 'Message not found.'})
+            return
+        if post['user_id'] != user_id:
+            emit('error', {'message': 'You can only edit your own messages.'})
+            return
+        conn.execute("UPDATE posts SET message=? WHERE id=?", (message_escaped, post_id))
+
+    print(f"[SOCKET MESSAGE] User ID: {user_id} edited message (Post ID: {post_id})", flush=True)
+
+    socketio.emit('message_edited', {
+        'id': post_id,
+        'message': message_escaped
+    })
+
+@socketio.on('delete_message')
+def handle_delete_message(data):
+    if 'user_id' not in session:
+        return
+    user_id = session['user_id']
+
+    with get_db() as conn:
+        user = conn.execute("SELECT is_banned FROM users WHERE id=?", (user_id,)).fetchone()
+    if not user or user['is_banned']:
+        disconnect()
+        return
+
+    post_id = data.get('id')
+    if not post_id:
+        return
+
+    with get_db() as conn:
+        post = conn.execute("SELECT id, user_id, deleted FROM posts WHERE id=?", (post_id,)).fetchone()
+        if not post or post['deleted']:
+            emit('error', {'message': 'Message not found or already deleted.'})
+            return
+        if post['user_id'] != user_id:
+            emit('error', {'message': 'You can only delete your own messages.'})
+            return
+        conn.execute("UPDATE posts SET deleted=1 WHERE id=?", (post_id,))
+
+    print(f"[SOCKET MESSAGE] User ID: {user_id} deleted own message (Post ID: {post_id})", flush=True)
+
+    socketio.emit('message_deleted', {'id': post_id})
 
 @socketio.on_error_default
 def default_error_handler(e):
@@ -1163,6 +1465,29 @@ def cleanup_expired_messages():
                     conn.commit()
         except Exception as e:
             print(f"[CLEANUP] Error during cleanup: {e}", flush=True)
+        
+        # ── Auto-approve expired moderation reviews ─────────────────────
+        try:
+            auto_approve_at = datetime.now(timezone.utc) - timedelta(minutes=MODERATION_REVIEW_MINUTES)
+            cutoff = auto_approve_at.isoformat()
+            with get_db() as conn:
+                pending = conn.execute(
+                    "SELECT id, post_id FROM moderation_reviews WHERE status='pending' AND created_at < ?",
+                    (cutoff,)
+                ).fetchall()
+                if pending:
+                    now_str = datetime.now(timezone.utc).isoformat()
+                    for review in pending:
+                        conn.execute(
+                            "UPDATE moderation_reviews SET status='approved', action='auto_approved', reviewed_at=? WHERE id=?",
+                            (now_str, review["id"])
+                        )
+                        print(f"[MODERATION] Auto-approved review #{review['id']} for post #{review['post_id']} "
+                              f"(exceeded {MODERATION_REVIEW_MINUTES}min review window)", flush=True)
+                    conn.commit()
+                    emit_to_admins('moderation_review_resolved', {'id': None, 'action': 'auto_approved_batch'})
+        except Exception as e:
+            print(f"[MODERATION] Error during auto-approve cleanup: {e}", flush=True)
 
 cleanup_task_started = False
 cleanup_task_lock = threading.Lock()

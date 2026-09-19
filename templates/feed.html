@@ -1,79 +1,191 @@
 {% extends "base.html" %}
-{% block title %}Chat — Class Voice{% endblock %}
+{% block title %}Class Voice — Student Chat{% endblock %}
+{% block main_wrap_class %} main-wrap-chat{% endblock %}
 {% block content %}
-<div class="chat-wrapper">
-  <!-- Chat Header -->
-  <div class="chat-header">
-    <div class="chat-header-left">
-      <span class="chat-logo-mark">💬</span>
-      <span class="chat-room-name">Anonymous Class Chat</span>
+<div class="app-layout chat-app-shell">
+  <!-- Minimal Left Utility Sidebar: ONLY Files -->
+  <aside class="sidebar-minimal" aria-label="Utility Sidebar">
+    <button type="button" class="sidebar-btn" id="sidebar-files-btn" title="Shared Files & Upload" onclick="toggleFilesDrawer()">
+      <div class="sidebar-btn-icon">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+        </svg>
+      </div>
+      <span class="sidebar-btn-label">Files</span>
+    </button>
+  </aside>
+
+  <!-- Shared Files Drawer / Slide-Over -->
+  <div class="files-drawer-overlay" id="files-drawer-overlay" onclick="toggleFilesDrawer(false)"></div>
+  <aside class="files-drawer" id="files-drawer" aria-label="Shared Files">
+    <div class="files-drawer-header">
+      <div class="files-drawer-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
+        <span>Shared Files</span>
+      </div>
+      <button type="button" class="files-drawer-close" onclick="toggleFilesDrawer(false)" aria-label="Close files panel">&times;</button>
     </div>
-    <div class="chat-header-right">
-  <span class="online-indicator" id="online-count">0 users online</span>
+    <div class="files-drawer-actions">
+      <button type="button" class="btn-upload-trigger" onclick="triggerFileUpload()">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        <span>Upload Document</span>
+      </button>
+      <p class="files-drawer-hint">PDF, DOCX, PPTX, PNG, JPG up to 10MB</p>
+    </div>
+    <div class="files-drawer-list" id="files-drawer-list">
+      <!-- Dynamically populated or shows list of files from chat -->
+    </div>
+  </aside>
 
-  {% if session.get('is_admin') %}
-    <a href="/admin" class="admin-nav-btn">Admin Dashboard</a>
-  {% endif %}
-</div>
-  </div>
-
-  <!-- Messages Window -->
-  <div class="chat-messages" id="chat-messages">
-    {% if posts %}
-      {% for post in posts %}
-        <div class="msg-bubble {% if post.user_id == session.user_id %}msg-own{% else %}msg-other{% endif %}" id="msg-{{ post.id }}">
-          <div class="msg-meta">
-            <span class="msg-sender {% if post.is_admin %}msg-sender-admin{% endif %}">
-              {% if post.is_admin %}Admin{% else %}Anonymous{% endif %}
-            </span>
-            <span class="msg-time" data-timestamp="{{ post.created_at }}">{{ post.created_at }}</span>
+  <!-- Main Chat Workspace -->
+  <section class="chat-main">
+    <div class="chat-wrapper">
+      <!-- Chat Header -->
+      <header class="chat-header">
+        <div class="chat-header-main">
+          <div class="chat-brand-info">
+            <div class="chat-title-row">
+              <h1 class="chat-room-name">Class Chat</h1>
+              <span class="chat-badge-anon">Anonymous</span>
+            </div>
+            <p class="chat-subtitle">Speak freely, connect with your classmates</p>
           </div>
-          <div class="msg-text">{{ post.message }}</div>
-          {% if post.filename %}
-            <div class="msg-attachment">
-              <a href="{{ url_for('uploaded_file', filename=post.filename) }}" target="_blank" rel="noopener">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
-                {{ post.orig_name }}
-              </a>
+        </div>
+
+        <div class="chat-header-actions">
+          <!-- Connection Status Badge -->
+          <div class="connection-status-badge status-connecting" id="connection-status-badge">
+            <span class="status-dot"></span>
+            <span class="status-text" id="status-text">Connecting...</span>
+          </div>
+
+          <!-- Online Count Pill -->
+          <div class="online-pill" id="online-count-wrap">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+              <circle cx="9" cy="7" r="4"></circle>
+              <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
+              <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+            </svg>
+            <span id="online-count">Connecting...</span>
+          </div>
+
+          {% if session.get('is_admin') %}
+            <a href="/admin" class="admin-nav-btn" title="Open Admin Dashboard">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+              <span>Admin</span>
+            </a>
+          {% endif %}
+        </div>
+      </header>
+
+      <!-- Messages Container Window -->
+      <div class="chat-messages-container">
+        <div class="chat-messages" id="chat-messages">
+          {% if posts %}
+            {% for post in posts %}
+              <div class="msg-bubble-wrap {% if post.user_id == session.user_id %}msg-own{% else %}msg-other{% endif %}" id="msg-{{ post.id }}" data-user-id="{{ post.user_id }}">
+                <div class="msg-avatar">
+                  <div class="avatar-circle avatar-student" title="Anonymous Student">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+                  </div>
+                </div>
+
+                <div class="msg-bubble-content">
+                  <div class="msg-meta">
+                    <span class="msg-sender">Anonymous</span>
+                    <span class="msg-time" data-timestamp="{{ post.created_at }}">{{ post.created_at }}</span>
+                  </div>
+                  <div class="msg-text">{{ post.message }}</div>
+
+                  {% if post.filename %}
+                    <div class="msg-attachment">
+                      <a href="{{ url_for('uploaded_file', filename=post.filename) }}" target="_blank" rel="noopener">
+                        <span class="attachment-icon">
+                          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
+                        </span>
+                        <span class="attachment-name">{{ post.orig_name }}</span>
+                        <span class="attachment-dl-icon">
+                          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                        </span>
+                      </a>
+                    </div>
+                  {% endif %}
+
+                  {% if post.user_id == session.user_id %}
+                    <div class="msg-actions">
+                      <button class="msg-action-btn msg-edit-btn" type="button" title="Edit message" onclick="startEditMessage({{ post.id }})">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                      </button>
+                      <button class="msg-action-btn msg-delete-btn" type="button" title="Delete message" onclick="deleteOwnMessage({{ post.id }})">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                      </button>
+                    </div>
+                  {% endif %}
+                </div>
+              </div>
+            {% endfor %}
+          {% else %}
+            <div class="empty-chat-state" id="empty-chat-state">
+              <div class="empty-chat-icon-wrap">
+                <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+                </svg>
+              </div>
+              <h3 class="empty-chat-title">Start the conversation</h3>
+              <p class="empty-chat-subtitle">Ask questions, share resources, or help your classmates anonymously.</p>
             </div>
           {% endif %}
         </div>
-      {% endfor %}
-    {% else %}
-      <div class="empty-chat-state" id="empty-chat-state">
-        <p>No messages yet. Start the conversation anonymously.</p>
+
+        <!-- Scroll to bottom floating button -->
+        <button class="btn-scroll-bottom" id="btn-scroll-bottom" type="button" aria-label="Scroll to newest messages">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
+          <span>New messages</span>
+        </button>
       </div>
-    {% endif %}
-  </div>
 
-  <!-- Selected file preview -->
-  <div class="file-preview-bar" id="file-preview-bar" style="display: none;">
-    <div class="file-preview-content">
-      <span class="file-preview-icon">📎</span>
-      <span class="file-preview-name" id="file-preview-name"></span>
-    </div>
-    <button class="btn-remove-file" id="btn-remove-file" type="button" aria-label="Remove attachment">&times;</button>
-  </div>
+      <!-- Selected File Preview Bar -->
+      <div class="file-preview-bar" id="file-preview-bar" style="display: none;">
+        <div class="file-preview-content">
+          <div class="file-preview-icon">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
+          </div>
+          <div class="file-preview-info">
+            <span class="file-preview-label">Attachment ready:</span>
+            <span class="file-preview-name" id="file-preview-name"></span>
+          </div>
+        </div>
+        <button class="btn-remove-file" id="btn-remove-file" type="button" aria-label="Remove attachment" title="Remove attachment">&times;</button>
+      </div>
 
-  <!-- Chat Input Footer -->
-  <div class="chat-footer">
-    <div class="mute-banner" id="mute-banner" {% if not is_muted %}style="display: none;"{% endif %}>
-      🔒 You have been muted by an administrator and cannot send messages.
+      <!-- Modern Bottom Composer Footer -->
+      <footer class="chat-footer">
+        <div class="mute-banner" id="mute-banner" {% if not is_muted %}style="display: none;"{% endif %}>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
+          <span>You have been muted by an administrator and cannot send messages.</span>
+        </div>
+
+        <form class="chat-input-form" id="chat-form" onsubmit="event.preventDefault();" {% if is_muted %}style="display: none;"{% endif %}>
+          <label class="chat-attach-btn" for="chat-file" title="Attach document or image">
+            <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
+            <input type="file" id="chat-file" accept=".pdf,.docx,.pptx,.png,.jpg,.jpeg" style="display: none;" />
+          </label>
+
+          <div class="input-field-wrapper">
+            <textarea class="chat-text-input" id="chat-text" placeholder="Type your message... (Enter to send, Shift + Enter for line break)" rows="1" autocomplete="off" required maxlength="2000"></textarea>
+          </div>
+
+          <button class="chat-send-btn" type="submit" id="chat-send" title="Send message">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+          </button>
+        </form>
+      </footer>
     </div>
-    <form class="chat-input-form" id="chat-form" onsubmit="event.preventDefault();" {% if is_muted %}style="display: none;"{% endif %}>
-      <label class="chat-attach-btn" for="chat-file" title="Attach file">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
-        <input type="file" id="chat-file" accept=".pdf,.docx,.pptx,.png,.jpg,.jpeg" style="display: none;" />
-      </label>
-      <input type="text" class="chat-text-input" id="chat-text" placeholder="Say something... (Max 2000 characters)" autocomplete="off" required maxlength="2000" />
-      <button class="chat-send-btn" type="submit" id="chat-send" title="Send message">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
-      </button>
-    </form>
-  </div>
+  </section>
 </div>
 
-<!-- Socket.IO library -->
+<!-- Socket.IO Client Script -->
 <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
 <script>
   const socket = io({
@@ -82,21 +194,59 @@
     reconnectionAttempts: 10,
     reconnectionDelay: 1000
   });
+
   const currentUserId = parseInt("{{ session.get('user_id', 0) }}");
   let selectedFile = null;
   let isMuted = "{{ is_muted }}".toLowerCase() === "true";
+  let isSocketConnected = false;
 
   const chatMessages = document.getElementById("chat-messages");
   const chatForm = document.getElementById("chat-form");
   const chatText = document.getElementById("chat-text");
   const chatFile = document.getElementById("chat-file");
+  const chatSendBtn = document.getElementById("chat-send");
   const filePreviewBar = document.getElementById("file-preview-bar");
   const filePreviewName = document.getElementById("file-preview-name");
   const btnRemoveFile = document.getElementById("btn-remove-file");
   const muteBanner = document.getElementById("mute-banner");
   const onlineCount = document.getElementById("online-count");
   const emptyChatState = document.getElementById("empty-chat-state");
+  const connectionBadge = document.getElementById("connection-status-badge");
+  const statusText = document.getElementById("status-text");
+  const btnScrollBottom = document.getElementById("btn-scroll-bottom");
 
+  // Helper to update connection status visually
+  function updateConnectionStatus(state, countText = null) {
+    if (!connectionBadge || !statusText) return;
+    
+    connectionBadge.className = "connection-status-badge status-" + state;
+    
+    if (state === "connected") {
+      statusText.textContent = "Connected";
+      isSocketConnected = true;
+      if (chatSendBtn) chatSendBtn.disabled = false;
+    } else if (state === "connecting") {
+      statusText.textContent = "Connecting...";
+      isSocketConnected = false;
+      if (chatSendBtn) chatSendBtn.disabled = true;
+    } else if (state === "reconnecting") {
+      statusText.textContent = "Reconnecting...";
+      isSocketConnected = false;
+      if (chatSendBtn) chatSendBtn.disabled = true;
+    } else if (state === "disconnected") {
+      statusText.textContent = "Disconnected";
+      isSocketConnected = false;
+      if (chatSendBtn) chatSendBtn.disabled = true;
+    }
+
+    if (onlineCount && countText !== null) {
+      onlineCount.textContent = countText;
+    } else if (onlineCount && state !== "connected") {
+      onlineCount.textContent = statusText.textContent;
+    }
+  }
+
+  // Format local time
   function formatLocalTime(isoString) {
     if (!isoString) return "";
     let parsed = isoString;
@@ -108,13 +258,65 @@
     }
     const date = new Date(parsed);
     if (isNaN(date.getTime())) return isoString;
-    return String(date.getHours()).padStart(2, '0') + ":" + String(date.getMinutes()).padStart(2, '0');
+    
+    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   }
 
-  // Scroll to bottom helper
-  function scrollToBottom() {
-    chatMessages.scrollTop = chatMessages.scrollHeight;
+  // Auto-resize textarea logic
+  function adjustTextareaHeight() {
+    if (!chatText) return;
+    chatText.style.height = 'auto';
+    const newHeight = Math.min(chatText.scrollHeight, 120);
+    chatText.style.height = newHeight + 'px';
   }
+
+  if (chatText) {
+    chatText.addEventListener('input', adjustTextareaHeight);
+    
+    // Handle Enter to send, Shift+Enter for new line
+    chatText.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        if (chatForm) {
+          const submitEvent = new Event('submit', { cancelable: true, bubbles: true });
+          chatForm.dispatchEvent(submitEvent);
+        }
+      }
+    });
+  }
+
+  // Scroll logic
+  function isScrolledToBottom() {
+    if (!chatMessages) return true;
+    const threshold = 120;
+    return chatMessages.scrollHeight - chatMessages.scrollTop - chatMessages.clientHeight < threshold;
+  }
+
+  function scrollToBottom(smooth = true) {
+    if (!chatMessages) return;
+    chatMessages.scrollTo({
+      top: chatMessages.scrollHeight,
+      behavior: smooth ? 'smooth' : 'auto'
+    });
+    if (btnScrollBottom) btnScrollBottom.classList.remove('visible');
+  }
+
+  if (chatMessages) {
+    chatMessages.addEventListener('scroll', () => {
+      if (btnScrollBottom) {
+        if (isScrolledToBottom()) {
+          btnScrollBottom.classList.remove('visible');
+        }
+      }
+    });
+  }
+
+  if (btnScrollBottom) {
+    btnScrollBottom.addEventListener('click', () => {
+      scrollToBottom(true);
+    });
+  }
+
   window.onload = function() {
     document.querySelectorAll(".msg-time").forEach(el => {
       const ts = el.getAttribute("data-timestamp");
@@ -122,136 +324,183 @@
         el.textContent = formatLocalTime(ts);
       }
     });
-    scrollToBottom();
+    scrollToBottom(false);
   };
 
   // Handle File Selection and Async Upload
-  chatFile.addEventListener("change", function() {
-    if (this.files.length > 0) {
-      const file = this.files[0];
-      const formData = new FormData();
-      formData.append("file", file);
-      
-      fetch("/upload", {
-        method: "POST",
-        body: formData
-      })
-      .then(response => {
-        if (!response.ok) {
-          return response.json().then(err => { throw new Error(err.error || "Upload failed") });
-        }
-        return response.json();
-      })
-      .then(data => {
-        selectedFile = {
-          filename: data.filename,
-          orig_name: data.orig_name
-        };
-        filePreviewName.textContent = data.orig_name;
-        filePreviewBar.style.display = "flex";
-        chatText.focus();
-      })
-      .catch(err => {
-        alert("Upload error: " + err.message);
-        chatFile.value = "";
-      });
-    }
-  });
+  if (chatFile) {
+    chatFile.addEventListener("change", function() {
+      if (this.files.length > 0) {
+        const file = this.files[0];
+        const formData = new FormData();
+        formData.append("file", file);
+        
+        fetch("/upload", {
+          method: "POST",
+          body: formData
+        })
+        .then(response => {
+          if (!response.ok) {
+            return response.json().then(err => { throw new Error(err.error || "Upload failed") });
+          }
+          return response.json();
+        })
+        .then(data => {
+          selectedFile = {
+            filename: data.filename,
+            orig_name: data.orig_name
+          };
+          filePreviewName.textContent = data.orig_name;
+          filePreviewBar.style.display = "flex";
+          if (chatText) chatText.focus();
+        })
+        .catch(err => {
+          alert("Upload error: " + err.message);
+          chatFile.value = "";
+        });
+      }
+    });
+  }
 
   // Remove selected file preview
-  btnRemoveFile.addEventListener("click", function() {
-    selectedFile = null;
-    chatFile.value = "";
-    filePreviewBar.style.display = "none";
-  });
+  if (btnRemoveFile) {
+    btnRemoveFile.addEventListener("click", function() {
+      selectedFile = null;
+      if (chatFile) chatFile.value = "";
+      filePreviewBar.style.display = "none";
+    });
+  }
 
   // Handle Send Message
-  chatForm.addEventListener("submit", function(e) {
-    e.preventDefault();
-    if (isMuted) return;
-    
-    const message = chatText.value.trim();
-    if (!message && !selectedFile) return;
-    
-    const payload = {
-      message: message,
-      filename: selectedFile ? selectedFile.filename : null,
-      orig_name: selectedFile ? selectedFile.orig_name : null
-    };
-    
-    socket.emit("send_message", payload);
-    
-    // Reset Inputs
-    chatText.value = "";
-    selectedFile = null;
-    chatFile.value = "";
-    filePreviewBar.style.display = "none";
-  });
+  if (chatForm) {
+    chatForm.addEventListener("submit", function(e) {
+      e.preventDefault();
+      if (isMuted) return;
+      if (!isSocketConnected) {
+        alert("Connection is currently re-establishing. Please wait a moment.");
+        return;
+      }
+      
+      const message = chatText ? chatText.value.trim() : "";
+      if (!message && !selectedFile) return;
+      
+      const payload = {
+        message: message,
+        filename: selectedFile ? selectedFile.filename : null,
+        orig_name: selectedFile ? selectedFile.orig_name : null
+      };
+      
+      socket.emit("send_message", payload);
+      
+      // Reset Inputs
+      if (chatText) {
+        chatText.value = "";
+        chatText.style.height = 'auto';
+      }
+      selectedFile = null;
+      if (chatFile) chatFile.value = "";
+      filePreviewBar.style.display = "none";
+    });
+  }
 
   // Socket.IO Events
   socket.on("connect", () => {
     console.log("Connected to Socket.IO server");
+    updateConnectionStatus("connected");
   });
 
   socket.on("connect_error", (err) => {
     console.error("Socket.IO connection error:", err);
-    if (onlineCount) {
-      onlineCount.textContent = "Connecting...";
-    }
+    updateConnectionStatus("connecting");
   });
 
   socket.on("disconnect", (reason) => {
     console.warn("Socket.IO disconnected:", reason);
     if (reason === "io server disconnect") {
       window.location.reload();
-    } else if (onlineCount) {
-      onlineCount.textContent = "Reconnecting...";
+    } else {
+      updateConnectionStatus("reconnecting");
     }
   });
 
   socket.on("online_count", (data) => {
-    onlineCount.textContent = `${data.count} users online`;
+    const userString = data.count === 1 ? "1 user online" : `${data.count} users online`;
+    updateConnectionStatus("connected", userString);
   });
 
   socket.on("new_message", (data) => {
     // Prevent duplicates
     if (document.getElementById(`msg-${data.id}`)) return;
     
-    if (emptyChatState) {
-      emptyChatState.remove();
+    const existingEmptyState = document.getElementById("empty-chat-state");
+    if (existingEmptyState) {
+      existingEmptyState.remove();
     }
     
     const isOwn = data.user_id === currentUserId;
-    const msgElement = document.createElement("div");
-    msgElement.className = `msg-bubble ${isOwn ? 'msg-own' : 'msg-other'}`;
-    msgElement.id = `msg-${data.id}`;
+    const msgWrap = document.createElement("div");
+    msgWrap.className = `msg-bubble-wrap ${isOwn ? 'msg-own' : 'msg-other'}`;
+    msgWrap.id = `msg-${data.id}`;
+    msgWrap.setAttribute('data-user-id', data.user_id);
     
     let attachmentHtml = "";
     if (data.filename) {
       attachmentHtml = `
         <div class="msg-attachment">
           <a href="/uploads/${data.filename}" target="_blank" rel="noopener">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
-            ${data.orig_name}
+            <span class="attachment-icon">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
+            </span>
+            <span class="attachment-name">${data.orig_name}</span>
+            <span class="attachment-dl-icon">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            </span>
           </a>
         </div>
       `;
     }
-    
-    const senderLabel = data.is_admin ? "Admin" : "Anonymous";
-    const senderClass = data.is_admin ? "msg-sender msg-sender-admin" : "msg-sender";
 
-    msgElement.innerHTML = `
-      <div class="msg-meta">
-        <span class="${senderClass}">${senderLabel}</span>
-        <span class="msg-time" data-timestamp="${data.created_at}">${formatLocalTime(data.created_at)}</span>
+    const avatarHtml = `
+      <div class="avatar-circle avatar-student" title="Anonymous Student">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+      </div>`;
+
+    let actionsHtml = "";
+    if (isOwn) {
+      actionsHtml = `
+        <div class="msg-actions">
+          <button class="msg-action-btn msg-edit-btn" type="button" title="Edit message" onclick="startEditMessage(${data.id})">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+          </button>
+          <button class="msg-action-btn msg-delete-btn" type="button" title="Delete message" onclick="deleteOwnMessage(${data.id})">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+          </button>
+        </div>
+      `;
+    }
+
+    msgWrap.innerHTML = `
+      <div class="msg-avatar">${avatarHtml}</div>
+      <div class="msg-bubble-content">
+        <div class="msg-meta">
+          <span class="msg-sender">Anonymous</span>
+          <span class="msg-time" data-timestamp="${data.created_at}">${formatLocalTime(data.created_at)}</span>
+        </div>
+        <div class="msg-text">${data.message}</div>
+        ${attachmentHtml}
+        ${actionsHtml}
       </div>
-      <div class="msg-text">${data.message}</div>
-      ${attachmentHtml}
     `;
     
-    chatMessages.appendChild(msgElement);
-    scrollToBottom();
+    const wasAtBottom = isScrolledToBottom();
+    chatMessages.appendChild(msgWrap);
+    
+    if (isOwn || wasAtBottom) {
+      scrollToBottom(true);
+    } else {
+      if (btnScrollBottom) btnScrollBottom.classList.add('visible');
+    }
+
     triggerNotification(data);
   });
 
@@ -266,11 +515,11 @@
     if (data.user_id === currentUserId) {
       isMuted = data.is_muted;
       if (isMuted) {
-        muteBanner.style.display = "block";
-        chatForm.style.display = "none";
+        if (muteBanner) muteBanner.style.display = "flex";
+        if (chatForm) chatForm.style.display = "none";
       } else {
-        muteBanner.style.display = "none";
-        chatForm.style.display = "flex";
+        if (muteBanner) muteBanner.style.display = "none";
+        if (chatForm) chatForm.style.display = "flex";
       }
     }
   });
@@ -290,12 +539,123 @@
     alert(data.message);
   });
 
+  // Handle moderation warning (SEVERE_VIOLATION — message was blocked)
+  socket.on("moderation_warning", (data) => {
+    const banner = document.createElement("div");
+    banner.className = "moderation-warning-banner";
+    banner.innerHTML = `
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+      <span>${data.message}</span>
+    `;
+    if (chatMessages) {
+      chatMessages.appendChild(banner);
+      scrollToBottom(true);
+      setTimeout(() => {
+        banner.style.opacity = "0";
+        banner.style.transform = "translateY(-8px)";
+        setTimeout(() => banner.remove(), 300);
+      }, 8000);
+    }
+  });
+
+  // Handle real-time message edits
+  socket.on("message_edited", (data) => {
+    const msgElement = document.getElementById(`msg-${data.id}`);
+    if (msgElement) {
+      const msgText = msgElement.querySelector('.msg-text');
+      if (msgText) {
+        msgText.innerHTML = data.message;
+        // Add or update edited indicator
+        let editedTag = msgElement.querySelector('.msg-edited-indicator');
+        if (!editedTag) {
+          editedTag = document.createElement('span');
+          editedTag.className = 'msg-edited-indicator';
+          editedTag.textContent = '(edited)';
+          const meta = msgElement.querySelector('.msg-meta');
+          if (meta) meta.appendChild(editedTag);
+        }
+      }
+    }
+  });
+
+  // Edit message functions
+  function startEditMessage(postId) {
+    const msgElement = document.getElementById(`msg-${postId}`);
+    if (!msgElement) return;
+
+    // Prevent multiple edit modes
+    if (msgElement.querySelector('.msg-edit-area')) return;
+
+    const msgText = msgElement.querySelector('.msg-text');
+    const actionsDiv = msgElement.querySelector('.msg-actions');
+    if (!msgText) return;
+
+    const currentText = unescapeHTML(msgText.innerHTML);
+    const originalDisplay = msgText.style.display;
+    msgText.style.display = 'none';
+    if (actionsDiv) actionsDiv.style.display = 'none';
+
+    const editArea = document.createElement('div');
+    editArea.className = 'msg-edit-area';
+    editArea.innerHTML = `
+      <textarea class="msg-edit-textarea" maxlength="2000">${currentText}</textarea>
+      <div class="msg-edit-buttons">
+        <button class="msg-edit-save-btn" type="button">Save</button>
+        <button class="msg-edit-cancel-btn" type="button">Cancel</button>
+      </div>
+    `;
+
+    msgText.parentNode.insertBefore(editArea, msgText.nextSibling);
+
+    const textarea = editArea.querySelector('.msg-edit-textarea');
+    textarea.focus();
+    textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+
+    // Handle Enter to save, Escape to cancel
+    textarea.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        saveEdit();
+      } else if (e.key === 'Escape') {
+        cancelEdit();
+      }
+    });
+
+    editArea.querySelector('.msg-edit-save-btn').addEventListener('click', saveEdit);
+    editArea.querySelector('.msg-edit-cancel-btn').addEventListener('click', cancelEdit);
+
+    function saveEdit() {
+      const newMessage = textarea.value.trim();
+      if (!newMessage) {
+        alert('Message cannot be empty.');
+        return;
+      }
+      if (newMessage.length > 2000) {
+        alert('Message is too long (max 2000 characters).');
+        return;
+      }
+      socket.emit('edit_message', { id: postId, message: newMessage });
+      cancelEdit();
+    }
+
+    function cancelEdit() {
+      editArea.remove();
+      msgText.style.display = '';
+      if (actionsDiv) actionsDiv.style.display = '';
+    }
+  }
+
+  // Delete own message function
+  function deleteOwnMessage(postId) {
+    if (!confirm('Are you sure you want to delete this message?')) return;
+    socket.emit('delete_message', { id: postId });
+  }
+
   // Ask for notification permission on first visit
   if (typeof Notification !== "undefined" && Notification.permission === "default") {
     Notification.requestPermission();
   }
 
-  // Helper to unescape HTML entities for push notification body
   function unescapeHTML(str) {
     if (!str) return "";
     const txt = document.createElement("textarea");
@@ -331,7 +691,6 @@
         osc.stop(startTime + duration);
       };
       
-      // Gentle dual-tone chime: E5 (659.25 Hz) then A5 (880 Hz)
       playTone(659.25, now, 0.15);
       playTone(880.00, now + 0.08, 0.25);
     } catch (e) {
@@ -357,12 +716,10 @@
   function triggerNotification(data) {
     const isOwn = data.user_id === currentUserId;
     
-    // Play sound if message is from another user
     if (!isOwn) {
       playNotificationSound();
     }
     
-    // Track unread messages and update title if tab is inactive
     if (!isTabActive) {
       if (!isOwn) {
         unreadCount++;
@@ -370,7 +727,6 @@
       }
     }
     
-    // Show browser push notification if from another user and permission granted
     if (!isOwn && typeof Notification !== "undefined" && Notification.permission === "granted") {
       let body = "";
       if (data.message) {
@@ -391,6 +747,81 @@
         console.error("Failed to show push notification:", e);
       }
     }
+  }
+
+  // ── Files Drawer Helper Functions ──────────────────────────────────
+  function toggleFilesDrawer(forceState = null) {
+    const drawer = document.getElementById("files-drawer");
+    const overlay = document.getElementById("files-drawer-overlay");
+    const btn = document.getElementById("sidebar-files-btn");
+    if (!drawer) return;
+
+    const isOpen = drawer.classList.contains("open");
+    const targetState = forceState !== null ? forceState : !isOpen;
+
+    if (targetState) {
+      drawer.classList.add("open");
+      if (overlay) overlay.classList.add("open");
+      if (btn) btn.classList.add("active");
+      populateSharedFiles();
+    } else {
+      drawer.classList.remove("open");
+      if (overlay) overlay.classList.remove("open");
+      if (btn) btn.classList.remove("active");
+    }
+  }
+
+  function triggerFileUpload() {
+    const fileInput = document.getElementById("chat-file");
+    if (fileInput) fileInput.click();
+    toggleFilesDrawer(false);
+  }
+
+  function populateSharedFiles() {
+    const list = document.getElementById("files-drawer-list");
+    if (!list) return;
+
+    const attachmentLinks = document.querySelectorAll(".chat-messages .msg-attachment a");
+    if (!attachmentLinks || attachmentLinks.length === 0) {
+      list.innerHTML = `
+        <div class="files-empty-state">
+          <div class="files-empty-icon">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>
+          </div>
+          <p class="files-empty-title">No files shared yet</p>
+          <span class="files-empty-sub">Files shared in this chat will appear here for quick access.</span>
+        </div>
+      `;
+      return;
+    }
+
+    let html = "";
+    // Display newest shared files first
+    const reversed = Array.from(attachmentLinks).reverse();
+    reversed.forEach(link => {
+      const href = link.getAttribute("href") || "#";
+      const nameEl = link.querySelector(".attachment-name");
+      const fileName = nameEl ? nameEl.textContent.trim() : "Document";
+      const parentBubble = link.closest(".msg-bubble-wrap");
+      const timeEl = parentBubble ? parentBubble.querySelector(".msg-time") : null;
+      const timeText = timeEl ? timeEl.textContent : "";
+
+      html += `
+        <div class="file-drawer-item">
+          <div class="file-drawer-item-icon">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>
+          </div>
+          <div class="file-drawer-item-info">
+            <a href="${href}" target="_blank" rel="noopener" class="file-drawer-item-name" title="${fileName}">${fileName}</a>
+            <span class="file-drawer-item-time">${timeText}</span>
+          </div>
+          <a href="${href}" download class="file-drawer-item-dl" title="Download">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          </a>
+        </div>
+      `;
+    });
+    list.innerHTML = html;
   }
 </script>
 {% endblock %}

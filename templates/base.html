@@ -5,26 +5,33 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>{% block title %}Class Voice{% endblock %}</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Syne:wght@700;800&display=swap" rel="stylesheet" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
+  {% block extra_head %}{% endblock %}
 </head>
-<body>
+<body class="{% block body_class %}{% endblock %}">
   <nav class="nav">
     <a href="{{ url_for('feed') if not session.get('is_admin') else url_for('admin_dashboard') }}" class="nav-logo">
-      <span class="logo-mark">CV</span>
+      <div class="logo-mark">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+        </svg>
+      </div>
       <span class="logo-text">Class Voice</span>
     </a>
     {% if session.get('user_id') %}
     <div class="nav-right">
       {% if session.get('is_admin') %}
-        <span class="badge-admin">Admin</span>
+        <a href="{{ url_for('admin_dashboard') }}" class="nav-admin-link">Staff Admin</a>
       {% endif %}
+      <span class="nav-user-label">{{ session.get('user_name', 'Student') }}</span>
       <a href="{{ url_for('logout') }}" class="nav-link">Sign out</a>
     </div>
     {% endif %}
   </nav>
 
-  <main class="main-wrap">
+  <main class="main-wrap{% block main_wrap_class %}{% endblock %}">
     {% with messages = get_flashed_messages(with_categories=true) %}
       {% if messages %}
         <div class="flash-stack">

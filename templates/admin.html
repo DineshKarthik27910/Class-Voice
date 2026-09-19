@@ -17,61 +17,14 @@
   </div>
 </div>
 
-  <!-- Tab Buttons -->
+  <!-- Tab Buttons: ONLY Student Directory and Moderation -->
   <div class="admin-tabs">
-    <button class="tab-btn active" id="btn-tab-messages" onclick="switchTab('tab-messages', this)">Messages ({{ posts|length }})</button>
-    <button class="tab-btn" id="btn-tab-students" onclick="switchTab('tab-students', this)">Student Directory ({{ users|length }})</button>
-    <button class="tab-btn" id="btn-tab-logs" onclick="switchTab('tab-logs', this)">Audit Logs ({{ logs|length }})</button>
-  </div>
-
-  <!-- Tab: Messages Moderation -->
-  <div id="tab-messages" class="tab-content active">
-    {% if posts %}
-      <div class="admin-table-wrap">
-        <table class="admin-table">
-          <thead>
-            <tr>
-              <th style="width: 80px;">Message ID</th>
-              <th>Message Content</th>
-              <th>Attachment</th>
-              <th>Posted Timestamp</th>
-              <th>Author Identity</th>
-              <th style="width: 120px; text-align: center;">Action</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for post in posts %}
-              <tr id="row-post-{{ post.id }}">
-                <td data-label="Message ID" style="color: var(--text-3); font-weight: 600;">#{{ post.id }}</td>
-                <td data-label="Message Content" class="td-message">{{ post.message }}</td>
-                <td data-label="Attachment" class="td-file">
-                  {% if post.filename %}
-                    <a href="{{ url_for('uploaded_file', filename=post.filename) }}" target="_blank" rel="noopener" class="admin-file-link">{{ post.orig_name }}</a>
-                  {% else %}
-                    <span class="no-file">—</span>
-                  {% endif %}
-                </td>
-                <td data-label="Posted Timestamp" class="td-time" data-timestamp="{{ post.created_at }}">{{ post.created_at }}</td>
-                <td data-label="Author Identity" class="td-identity">
-                  <div class="identity-action-container">
-                    <button class="btn-reveal" type="button" data-post-id="{{ post.id }}" onclick="revealIdentity(this.dataset.postId, this)">Reveal Identity</button>
-                  </div>
-                </td>
-                <td data-label="Action" class="td-action" style="text-align: center;">
-                  <button class="btn-delete"  type="button"  data-post-id="{{ post.id }}"  onclick="deleteMessage(this.dataset.postId, this)">Remove</button>
-                </td>
-              </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-      </div>
-    {% else %}
-      <div class="empty-state">No active messages in history.</div>
-    {% endif %}
+    <button class="tab-btn active" id="btn-tab-students" onclick="switchTab('tab-students', this)">Student Directory</button>
+    <button class="tab-btn{% if pending_moderation_count %} tab-btn-alert{% endif %}" id="btn-tab-moderation" onclick="switchTab('tab-moderation', this); loadModerationReviews();">Moderation{% if pending_moderation_count %} <span class="moderation-count-badge" id="moderation-count-badge">{{ pending_moderation_count }}</span>{% else %} <span class="moderation-count-badge" id="moderation-count-badge" style="display:none;">0</span>{% endif %}</button>
   </div>
 
   <!-- Tab: Student Directory -->
-  <div id="tab-students" class="tab-content">
+  <div id="tab-students" class="tab-content active">
     {% if users %}
       <div class="admin-table-wrap">
         <table class="admin-table">
@@ -124,38 +77,11 @@
     {% endif %}
   </div>
 
-  <!-- Tab: Audit Logs -->
-  <div id="tab-logs" class="tab-content">
-    {% if logs %}
-      <div class="admin-table-wrap">
-        <table class="admin-table">
-          <thead>
-            <tr>
-              <th>Moderator</th>
-              <th>Email</th>
-              <th>Action</th>
-              <th>Details & Notes</th>
-              <th>Timestamp</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for log in logs %}
-              <tr>
-                <td data-label="Moderator" class="td-name">{{ log.admin_name }}</td>
-                <td data-label="Email" class="td-email">{{ log.admin_email }}</td>
-                <td data-label="Action">
-                  <span class="badge-action action-{{ log.action.lower() }}">{{ log.action }}</span>
-                </td>
-                <td data-label="Details & Notes" class="td-message">{{ log.note }}</td>
-                <td data-label="Timestamp" class="td-time" data-timestamp="{{ log.ts }}">{{ log.ts }}</td>
-              </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-      </div>
-    {% else %}
-      <div class="empty-state">No administrative actions logged yet.</div>
-    {% endif %}
+  <!-- Tab: AI Moderation Reviews -->
+  <div id="tab-moderation" class="tab-content">
+    <div id="moderation-reviews-container">
+      <div class="empty-state" id="moderation-empty">Loading moderation reviews...</div>
+    </div>
   </div>
 </div>
 
@@ -166,61 +92,6 @@
     
     document.getElementById(tabId).classList.add("active");
     btn.classList.add("active");
-  }
-
-  function revealIdentity(postId, btn) {
-    if (!confirm("Reveal real identity of this author? This action is logged.")) return;
-    
-    btn.disabled = true;
-    btn.textContent = "Loading...";
-    
-    fetch(`/admin/reveal-identity/${postId}`, {
-      method: "POST"
-    })
-    .then(response => {
-      if (!response.ok) throw new Error("Failed to load identity");
-      return response.json();
-    })
-    .then(data => {
-      const container = btn.parentElement;
-      container.innerHTML = `
-        <div class="identity-badge">
-          <div><strong>Name:</strong> ${data.name}</div>
-          <div><strong>Email:</strong> ${data.email}</div>
-          <div><strong>Roll No:</strong> ${data.roll_no}</div>
-        </div>
-      `;
-    })
-    .catch(err => {
-      alert("Error: " + err.message);
-      btn.disabled = false;
-      btn.textContent = "Reveal Identity";
-    });
-  }
-
-  function deleteMessage(postId, btn) {
-    if (!confirm("Are you sure you want to delete this message? All clients will update in real-time. This action is logged.")) return;
-    
-    btn.disabled = true;
-    
-    fetch(`/admin/delete/${postId}`, {
-      method: "POST"
-    })
-    .then(response => {
-      if (!response.ok) throw new Error("Delete failed");
-      return response.json();
-    })
-    .then(data => {
-      const row = document.getElementById(`row-post-${postId}`);
-      if (row) {
-        row.classList.add("row-deleted");
-        row.querySelector(".td-action").innerHTML = `<span class="badge-status status-banned">Removed</span>`;
-      }
-    })
-    .catch(err => {
-      alert("Error: " + err.message);
-      btn.disabled = false;
-    });
   }
 
   function toggleMute(userId, isMuted, btn) {
@@ -296,5 +167,139 @@
       }
     });
   });
+
+  // ── Moderation Tab Functions ──────────────────────────────────────
+
+  let moderationLoaded = false;
+
+  function loadModerationReviews() {
+    fetch('/admin/moderation')
+      .then(r => { if (!r.ok) throw new Error('Failed'); return r.json(); })
+      .then(data => {
+        renderModerationReviews(data.reviews);
+        moderationLoaded = true;
+      })
+      .catch(err => {
+        document.getElementById('moderation-reviews-container').innerHTML =
+          '<div class="empty-state">Error loading moderation reviews.</div>';
+      });
+  }
+
+  function renderModerationReviews(reviews) {
+    const container = document.getElementById('moderation-reviews-container');
+    if (!reviews || reviews.length === 0) {
+      container.innerHTML = '<div class="empty-state">No messages pending review.</div>';
+      updateModerationBadge(0);
+      return;
+    }
+    updateModerationBadge(reviews.length);
+    let html = '';
+    reviews.forEach(r => {
+      const timeStr = formatLocalDateTime(r.created_at);
+      const confidencePct = (r.confidence * 100).toFixed(0);
+      html += `
+        <div class="moderation-card" id="mod-card-${r.id}">
+          <div class="moderation-card-header">
+            <span class="moderation-badge">${r.category.replace('_', ' ')}</span>
+            <span class="moderation-time">${timeStr}</span>
+          </div>
+          <div class="moderation-card-body">
+            <div class="moderation-message">${r.message}</div>
+            <div class="moderation-meta">
+              <span class="moderation-reason"><strong>Reason:</strong> ${r.reason || 'N/A'}</span>
+              <span class="moderation-confidence"><strong>Confidence:</strong> ${confidencePct}%</span>
+            </div>
+          </div>
+          <div class="moderation-card-actions">
+            <button class="btn-fine" onclick="moderationAction(${r.id}, 'approve', this)">Fine</button>
+            <button class="btn-reject" onclick="moderationAction(${r.id}, 'reject', this)">Delete</button>
+          </div>
+        </div>`;
+    });
+    container.innerHTML = html;
+  }
+
+  function moderationAction(reviewId, action, btn) {
+    const verb = action === 'approve' ? 'approve' : 'delete';
+    if (!confirm(`Are you sure you want to ${verb} this message? This action is logged.`)) return;
+    btn.disabled = true;
+    fetch(`/admin/moderation/${action}/${reviewId}`, { method: 'POST' })
+      .then(r => { if (!r.ok) throw new Error('Failed'); return r.json(); })
+      .then(data => {
+        const card = document.getElementById(`mod-card-${reviewId}`);
+        if (card) {
+          card.style.opacity = '0';
+          card.style.transform = 'translateX(20px)';
+          setTimeout(() => {
+            card.remove();
+            const remaining = document.querySelectorAll('.moderation-card').length;
+            if (remaining === 0) {
+              document.getElementById('moderation-reviews-container').innerHTML =
+                '<div class="empty-state">No messages pending review.</div>';
+            }
+            updateModerationBadge(remaining);
+          }, 250);
+        }
+      })
+      .catch(err => {
+        alert('Error: ' + err.message);
+        btn.disabled = false;
+      });
+  }
+
+  function updateModerationBadge(count) {
+    const badge = document.getElementById('moderation-count-badge');
+    const tabBtn = document.getElementById('btn-tab-moderation');
+    if (badge) {
+      if (count > 0) {
+        badge.textContent = count;
+        badge.style.display = 'inline-flex';
+        if (tabBtn) tabBtn.classList.add('tab-btn-alert');
+      } else {
+        badge.style.display = 'none';
+        if (tabBtn) tabBtn.classList.remove('tab-btn-alert');
+      }
+    }
+  }
+
+  // ── Socket.IO for real-time moderation updates ────────────────────
+  (function() {
+    const script = document.createElement('script');
+    script.src = 'https://cdn.socket.io/4.7.5/socket.io.min.js';
+    script.onload = function() {
+      const adminSocket = io({
+        transports: ['polling', 'websocket'],
+        reconnection: true,
+        reconnectionAttempts: 5,
+        reconnectionDelay: 2000
+      });
+
+      adminSocket.on('moderation_review_new', function(data) {
+        // If moderation tab was loaded, refresh it
+        if (moderationLoaded) {
+          loadModerationReviews();
+        } else {
+          // Just update the badge count
+          const badge = document.getElementById('moderation-count-badge');
+          if (badge) {
+            let current = parseInt(badge.textContent) || 0;
+            updateModerationBadge(current + 1);
+          }
+        }
+      });
+
+      adminSocket.on('moderation_review_resolved', function(data) {
+        if (data.id) {
+          const card = document.getElementById(`mod-card-${data.id}`);
+          if (card) card.remove();
+        }
+        // Refresh if batch auto-approved or tab is active
+        if (moderationLoaded) {
+          loadModerationReviews();
+        }
+      });
+    };
+    document.head.appendChild(script);
+  })();
 </script>
 {% endblock %}
